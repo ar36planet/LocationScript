@@ -1,0 +1,6 @@
+#!/bin/zsh
+export PATH="/opt/homebrew/bin:$HOME/.local/bin:$PATH"
+SCRIPT_DIR="$(cd "$(dirname "$(dirname "$(dirname "$(dirname "$0")")")")" && pwd)"
+PYTHON_PATH="$(brew --prefix python)/bin/python3"
+cd "$SCRIPT_DIR"
+"$PYTHON_PATH" app.py
