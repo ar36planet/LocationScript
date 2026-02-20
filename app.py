@@ -12,6 +12,25 @@ PYMOBILEDEVICE3 = shutil.which("pymobiledevice3") or os.path.expanduser("~/.loca
 # 收藏檔案路徑
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 FAVORITES_FILE = os.path.join(SCRIPT_DIR, "favorites.json")
+HISTORY_DIR = os.path.join(SCRIPT_DIR, "history")
+
+def save_to_history(lat, lng):
+    from datetime import datetime
+    os.makedirs(HISTORY_DIR, exist_ok=True)
+    today = datetime.now().strftime("%Y%m%d")
+    history_file = os.path.join(HISTORY_DIR, f"{today}.json")
+    if os.path.exists(history_file):
+        with open(history_file, "r", encoding="utf-8") as f:
+            records = json.load(f)
+    else:
+        records = []
+    records.append({
+        "lat": lat,
+        "lng": lng,
+        "time": datetime.now().strftime("%H:%M:%S")
+    })
+    with open(history_file, "w", encoding="utf-8") as f:
+        json.dump(records, f, ensure_ascii=False, indent=2)
 
 def load_favorites():
     if os.path.exists(FAVORITES_FILE):
@@ -139,6 +158,7 @@ def set_location():
         [PYMOBILEDEVICE3, "developer", "dvt", "simulate-location", "set", "--", lat, lng],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
+    save_to_history(lat, lng)
     status.config(text=f"✅ 已設定：{lat}, {lng}")
 
 def clear_location():
