@@ -88,13 +88,16 @@ def delete_favorite():
     else:
         status.config(text="❌ 請先選擇要刪除的地點")
 
+_tunnel_check_id = None
+
 def check_tunnel_status():
+    global _tunnel_check_id
     result = subprocess.run(["pgrep", "-f", "pymobiledevice3 remote tunneld"], capture_output=True, text=True)
     if result.stdout.strip():
         tunnel_status.config(text="🟢 Tunnel 運行中", fg="green")
     else:
         tunnel_status.config(text="🔴 Tunnel 未啟動", fg="red")
-    root.after(2000, check_tunnel_status)
+    _tunnel_check_id = root.after(2000, check_tunnel_status)
 
 def start_tunnel():
     script = '''
@@ -176,10 +179,12 @@ def set_location():
         status.config(text="❌ 經度範圍錯誤（需介於 -180 ~ 180）")
         return
     
-    subprocess.Popen(
-        [PYMOBILEDEVICE3, "developer", "dvt", "simulate-location", "set", "--", lat, lng],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-    )
+    def run_set():
+        subprocess.run(
+            [PYMOBILEDEVICE3, "developer", "dvt", "simulate-location", "set", "--", lat, lng],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+    threading.Thread(target=run_set, daemon=True).start()
     save_to_history(lat, lng)
     status.config(text=f"✅ 已設定：{lat}, {lng}")
     location_name_label.config(text="")
@@ -216,6 +221,10 @@ def clear_location():
         status.config(text=f"❌ {result.stderr[:50]}")
 
 def on_closing():
+    global _tunnel_check_id
+    if _tunnel_check_id is not None:
+        root.after_cancel(_tunnel_check_id)
+        _tunnel_check_id = None
     result = subprocess.run(["pgrep", "-f", "pymobiledevice3 remote tunneld"], capture_output=True, text=True)
     if result.stdout.strip():
         if messagebox.askyesno("結束", "要同時停止 tunneld 嗎？"):
