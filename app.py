@@ -1,10 +1,13 @@
 import tkinter as tk
-from tkinter import messagebox, simpledialog
+from tkinter import messagebox, simpledialog, filedialog
 import subprocess
 import re
 import json
 import os
 import shutil
+import urllib.request
+import urllib.parse
+import threading
 
 # 取得 pymobiledevice3 路徑
 PYMOBILEDEVICE3 = shutil.which("pymobiledevice3") or os.path.expanduser("~/.local/bin/pymobiledevice3")
@@ -139,6 +142,18 @@ def parse_google_url():
     
     status.config(text="❌ 無法解析網址")
 
+def parse_coords():
+    text = coords_entry.get().strip()
+    match = re.match(r'^([-\d.]+)[,\s]+([-\d.]+)$', text)
+    if match:
+        lat_entry.delete(0, tk.END)
+        lat_entry.insert(0, match.group(1))
+        lng_entry.delete(0, tk.END)
+        lng_entry.insert(0, match.group(2))
+        status.config(text="✅ 已解析座標")
+    else:
+        status.config(text="❌ 格式錯誤，請輸入如：25.112233,123.123123")
+
 def set_location():
     lat = lat_entry.get().strip()
     lng = lng_entry.get().strip()
@@ -148,10 +163,17 @@ def set_location():
         return
     
     try:
-        float(lat)
-        float(lng)
+        lat_f = float(lat)
+        lng_f = float(lng)
     except ValueError:
         status.config(text="❌ 經緯度格式錯誤")
+        return
+
+    if not (-90 <= lat_f <= 90):
+        status.config(text="❌ 緯度範圍錯誤（需介於 -90 ~ 90）")
+        return
+    if not (-180 <= lng_f <= 180):
+        status.config(text="❌ 經度範圍錯誤（需介於 -180 ~ 180）")
         return
     
     subprocess.Popen(
@@ -160,6 +182,28 @@ def set_location():
     )
     save_to_history(lat, lng)
     status.config(text=f"✅ 已設定：{lat}, {lng}")
+    location_name_label.config(text="")
+
+    def fetch_name():
+        try:
+            url = (
+                f"https://nominatim.openstreetmap.org/reverse"
+                f"?lat={urllib.parse.quote(lat)}&lon={urllib.parse.quote(lng)}"
+                f"&format=json&accept-language=zh-TW"
+            )
+            req = urllib.request.Request(url, headers={"User-Agent": "iOS-LocationScript/1.0"})
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                data = json.loads(resp.read())
+            if "error" in data:
+                root.after(0, lambda: location_name_label.config(text="⚠️ 座標查無地點（可能為海洋或荒地）", fg="orange"))
+                return
+            name = data.get("display_name", "")
+            if name:
+                root.after(0, lambda: location_name_label.config(text=name, fg="gray"))
+        except Exception:
+            pass
+
+    threading.Thread(target=fetch_name, daemon=True).start()
 
 def clear_location():
     result = subprocess.run(
@@ -178,13 +222,58 @@ def on_closing():
             stop_tunnel()
     root.destroy()
 
+# 座標清單資料
+coord_list_items: list = []
+coord_listbox: tk.Listbox
+list_count_label: tk.Label
+location_name_label: tk.Label
+
+def load_coord_list():
+    filepath = filedialog.askopenfilename(
+        title="選擇座標清單",
+        filetypes=[("JSON 檔案", "*.json"), ("所有檔案", "*.*")]
+    )
+    if not filepath:
+        return
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        coord_list_items.clear()
+        coord_listbox.delete(0, tk.END)
+        if isinstance(data, list):
+            for item in data:
+                if "lat" in item and "lng" in item:
+                    name = item.get("name", f"{item['lat']}, {item['lng']}")
+                    coord_list_items.append({"name": name, "lat": str(item["lat"]), "lng": str(item["lng"])})
+                    coord_listbox.insert(tk.END, name)
+        elif isinstance(data, dict):
+            for name, coords in data.items():
+                if "lat" in coords and "lng" in coords:
+                    coord_list_items.append({"name": name, "lat": str(coords["lat"]), "lng": str(coords["lng"])})
+                    coord_listbox.insert(tk.END, name)
+        list_count_label.config(text=f"共 {len(coord_list_items)} 筆")
+        status.config(text=f"✅ 已載入 {len(coord_list_items)} 筆座標")
+    except Exception as e:
+        status.config(text=f"❌ 載入失敗：{str(e)[:50]}")
+
+def on_coord_list_select(event):
+    selection = coord_listbox.curselection()
+    if not selection:
+        return
+    item = coord_list_items[selection[0]]
+    lat_entry.delete(0, tk.END)
+    lat_entry.insert(0, item["lat"])
+    lng_entry.delete(0, tk.END)
+    lng_entry.insert(0, item["lng"])
+    set_location()
+
 # 載入收藏
 favorites = load_favorites()
 
 # 主視窗
 root = tk.Tk()
 root.title("iOS 虛擬定位")
-root.geometry("820x400")
+root.geometry("1080x540")
 root.protocol("WM_DELETE_WINDOW", on_closing)
 
 frame = tk.Frame(root, padx=20, pady=15)
@@ -216,32 +305,61 @@ tk.Button(fav_frame, text="🗑️ 刪除", command=delete_favorite).pack(side=t
 
 update_favorites_menu()
 
+# 座標清單（右側欄）
+list_frame = tk.LabelFrame(frame, text="座標清單", padx=10, pady=10)
+list_frame.grid(row=0, column=5, rowspan=9, sticky="nsew", padx=(20, 0))
+
+list_top = tk.Frame(list_frame)
+list_top.pack(fill=tk.X, pady=(0, 5))
+tk.Button(list_top, text="📂 載入清單", command=load_coord_list).pack(side=tk.LEFT)
+list_count_label = tk.Label(list_top, text="")
+list_count_label.pack(side=tk.LEFT, padx=8)
+
+list_scroll_frame = tk.Frame(list_frame)
+list_scroll_frame.pack(fill=tk.BOTH, expand=True)
+scrollbar = tk.Scrollbar(list_scroll_frame)
+scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+coord_listbox = tk.Listbox(list_scroll_frame, yscrollcommand=scrollbar.set, width=28, height=13, selectmode=tk.SINGLE)
+coord_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+scrollbar.config(command=coord_listbox.yview)
+coord_listbox.bind("<<ListboxSelect>>", on_coord_list_select)
+
 # Google Maps 網址
 tk.Label(frame, text="Google Maps 網址：").grid(row=3, column=0, sticky="w")
 url_entry = tk.Entry(frame, width=40)
 url_entry.grid(row=3, column=1, columnspan=2)
 tk.Button(frame, text="解析", command=parse_google_url).grid(row=3, column=3, padx=5)
 
+# 座標字串
+tk.Label(frame, text="座標字串：").grid(row=4, column=0, sticky="w")
+coords_entry = tk.Entry(frame, width=40)
+coords_entry.grid(row=4, column=1, columnspan=2)
+tk.Button(frame, text="解析", command=parse_coords).grid(row=4, column=3, padx=5)
+
 # 經緯度
-tk.Label(frame, text="緯度：").grid(row=4, column=0, sticky="w", pady=10)
+tk.Label(frame, text="緯度：").grid(row=5, column=0, sticky="w", pady=10)
 lat_entry = tk.Entry(frame, width=15)
-lat_entry.grid(row=4, column=1, sticky="w")
+lat_entry.grid(row=5, column=1, sticky="w")
 lat_entry.insert(0, "25.0330")
 
-tk.Label(frame, text="經度：").grid(row=4, column=2, sticky="e")
+tk.Label(frame, text="經度：").grid(row=5, column=2, sticky="e")
 lng_entry = tk.Entry(frame, width=15)
-lng_entry.grid(row=4, column=3, sticky="w")
+lng_entry.grid(row=5, column=3, sticky="w")
 lng_entry.insert(0, "121.5654")
 
 # 按鈕
 btn_frame = tk.Frame(frame)
-btn_frame.grid(row=5, column=0, columnspan=4, pady=15)
+btn_frame.grid(row=6, column=0, columnspan=4, pady=15)
 tk.Button(btn_frame, text="📍 設定位置", command=set_location, width=12).pack(side=tk.LEFT, padx=5)
 tk.Button(btn_frame, text="🔄 清除", command=clear_location, width=12).pack(side=tk.LEFT, padx=5)
 
 # 狀態
 status = tk.Label(frame, text="就緒 — iOS 16 以下可跳過 Tunnel")
-status.grid(row=6, column=0, columnspan=4)
+status.grid(row=7, column=0, columnspan=4)
+
+# 地點名稱
+location_name_label = tk.Label(frame, text="", fg="gray", wraplength=380, justify="center")
+location_name_label.grid(row=8, column=0, columnspan=4, pady=(0, 5))
 
 # 啟動狀態檢查
 check_tunnel_status()
