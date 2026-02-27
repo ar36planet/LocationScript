@@ -8,12 +8,25 @@ import shutil
 import urllib.request
 import urllib.parse
 import threading
+import sys
+
+# 偵測是否在 PyInstaller 打包的環境中執行
+_FROZEN = getattr(sys, 'frozen', False)
 
 # 取得 pymobiledevice3 路徑
-PYMOBILEDEVICE3 = shutil.which("pymobiledevice3") or os.path.expanduser("~/.local/bin/pymobiledevice3")
+if _FROZEN:
+    # 打包後：pymobiledevice3 與主程式放在同一個 MacOS/ 目錄
+    PYMOBILEDEVICE3 = os.path.join(os.path.dirname(sys.executable), "pymobiledevice3")
+else:
+    PYMOBILEDEVICE3 = shutil.which("pymobiledevice3") or os.path.expanduser("~/.local/bin/pymobiledevice3")
 
 # 收藏檔案路徑
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _FROZEN:
+    # 打包後：存放在 ~/Library/Application Support/iOS虛擬定位/
+    SCRIPT_DIR = os.path.expanduser("~/Library/Application Support/iOS虛擬定位")
+    os.makedirs(SCRIPT_DIR, exist_ok=True)
+else:
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 FAVORITES_FILE = os.path.join(SCRIPT_DIR, "favorites.json")
 HISTORY_DIR = os.path.join(SCRIPT_DIR, "history")
 

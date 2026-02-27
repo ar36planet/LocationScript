@@ -1,2 +1,6 @@
 *.json
 favorites.json
+.build_venv/
+build/
+dist/
+*.spec
