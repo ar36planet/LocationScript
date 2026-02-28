@@ -101,7 +101,48 @@ def delete_favorite():
     else:
         status.config(text="❌ 請先選擇要刪除的地點")
 
+def import_favorites():
+    filepath = filedialog.askopenfilename(
+        title="匯入最愛",
+        initialdir=SCRIPT_DIR,
+        filetypes=[("JSON 檔案", "*.json"), ("所有檔案", "*.*")]
+    )
+    if not filepath:
+        return
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        imported = {}
+        if isinstance(data, dict):
+            for name, coords in data.items():
+                if "lat" in coords and "lng" in coords:
+                    imported[name] = {"lat": str(coords["lat"]), "lng": str(coords["lng"])}
+        elif isinstance(data, list):
+            for item in data:
+                if "lat" in item and "lng" in item:
+                    name = item.get("name", f"{item['lat']}, {item['lng']}")
+                    imported[name] = {"lat": str(item["lat"]), "lng": str(item["lng"])}
+        if not imported:
+            status.config(text="❌ 找不到可匯入的地點")
+            return
+        if favorites:
+            replace = messagebox.askyesnocancel(
+                "匯入最愛",
+                f"找到 {len(imported)} 筆地點。\n\n「是」覆蓋現有收藏，「否」合併（重複名稱以匯入為準）"
+            )
+            if replace is None:
+                return
+            if replace:
+                favorites.clear()
+        favorites.update(imported)
+        save_favorites()
+        update_favorites_menu()
+        status.config(text=f"✅ 已匯入 {len(imported)} 筆地點")
+    except Exception as e:
+        status.config(text=f"❌ 匯入失敗：{str(e)[:50]}")
+
 _tunnel_check_id = None
+_tunnel_window_id = None
 
 def check_tunnel_status():
     global _tunnel_check_id
@@ -113,27 +154,36 @@ def check_tunnel_status():
     _tunnel_check_id = root.after(2000, check_tunnel_status)
 
 def start_tunnel():
+    global _tunnel_window_id
+    result = subprocess.run(["pgrep", "-f", "pymobiledevice3 remote tunneld"], capture_output=True, text=True)
+    if result.stdout.strip():
+        status.config(text="⚠️ tunneld 已在執行中，無需重複啟動")
+        return
     script = '''
     tell application "Terminal"
         activate
         do script "sudo pymobiledevice3 remote tunneld"
+        return id of window 1
     end tell
     '''
-    subprocess.run(["osascript", "-e", script])
+    result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+    _tunnel_window_id = result.stdout.strip()
     status.config(text="✅ 已開啟 Terminal 執行 tunneld")
 
 def stop_tunnel():
+    global _tunnel_window_id
     result = subprocess.run(["pgrep", "-f", "pymobiledevice3 remote tunneld"], capture_output=True, text=True)
-    pids = result.stdout.strip().split("\n")
-    if pids and pids[0]:
-        for pid in pids:
-            try:
-                subprocess.run(["kill", "-9", pid])
-            except:
-                pass
+    if not result.stdout.strip():
+        status.config(text="⚠️ 找不到運行中的 tunneld")
+        _tunnel_window_id = None
+        return
+    script = """do shell script "pkill -9 -f 'pymobiledevice3 remote tunneld'" with administrator privileges"""
+    result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+    _tunnel_window_id = None
+    if result.returncode == 0:
         status.config(text="✅ 已停止 tunneld")
     else:
-        status.config(text="⚠️ 找不到運行中的 tunneld")
+        status.config(text="❌ 停止失敗（可能已取消授權）")
 
 def parse_google_url():
     url = url_entry.get().strip()
@@ -170,37 +220,46 @@ def parse_coords():
     else:
         status.config(text="❌ 格式錯誤，請輸入如：25.112233,123.123123")
 
-def set_location():
-    lat = lat_entry.get().strip()
-    lng = lng_entry.get().strip()
-    
-    if not lat or not lng:
-        status.config(text="❌ 請輸入經緯度")
-        return
-    
+def set_location_direct(lat: str, lng: str, save_history: bool = True):
+    """直接以參數設定位置，可從任意執行緒安全呼叫。"""
     try:
         lat_f = float(lat)
         lng_f = float(lng)
     except ValueError:
-        status.config(text="❌ 經緯度格式錯誤")
+        root.after(0, lambda: status.config(text="❌ 經緯度格式錯誤"))
         return
 
     if not (-90 <= lat_f <= 90):
-        status.config(text="❌ 緯度範圍錯誤（需介於 -90 ~ 90）")
+        root.after(0, lambda: status.config(text="❌ 緯度範圍錯誤（需介於 -90 ~ 90）"))
         return
     if not (-180 <= lng_f <= 180):
-        status.config(text="❌ 經度範圍錯誤（需介於 -180 ~ 180）")
+        root.after(0, lambda: status.config(text="❌ 經度範圍錯誤（需介於 -180 ~ 180）"))
         return
-    
+
     def run_set():
-        subprocess.run(
-            [PYMOBILEDEVICE3, "developer", "dvt", "simulate-location", "set", "--", lat, lng],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
+        try:
+            proc = subprocess.Popen(
+                [PYMOBILEDEVICE3, "developer", "dvt", "simulate-location", "set", "--", lat, lng],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        except Exception:
+            pass
     threading.Thread(target=run_set, daemon=True).start()
-    save_to_history(lat, lng)
-    status.config(text=f"✅ 已設定：{lat}, {lng}")
-    location_name_label.config(text="")
+    if save_history:
+        save_to_history(lat, lng)
+
+    def update_ui():
+        lat_entry.delete(0, tk.END)
+        lat_entry.insert(0, lat)
+        lng_entry.delete(0, tk.END)
+        lng_entry.insert(0, lng)
+        status.config(text=f"✅ 已設定：{lat}, {lng}")
+        location_name_label.config(text="")
+    root.after(0, update_ui)
 
     def fetch_name():
         try:
@@ -220,8 +279,15 @@ def set_location():
                 root.after(0, lambda: location_name_label.config(text=name, fg="gray"))
         except Exception:
             pass
-
     threading.Thread(target=fetch_name, daemon=True).start()
+
+def set_location():
+    lat = lat_entry.get().strip()
+    lng = lng_entry.get().strip()
+    if not lat or not lng:
+        status.config(text="❌ 請輸入經緯度")
+        return
+    set_location_direct(lat, lng)
 
 def clear_location():
     result = subprocess.run(
@@ -238,6 +304,8 @@ def on_closing():
     if _tunnel_check_id is not None:
         root.after_cancel(_tunnel_check_id)
         _tunnel_check_id = None
+    if patrol_controller and patrol_controller.is_running:
+        patrol_controller.stop()
     result = subprocess.run(["pgrep", "-f", "pymobiledevice3 remote tunneld"], capture_output=True, text=True)
     if result.stdout.strip():
         if messagebox.askyesno("結束", "要同時停止 tunneld 嗎？"):
@@ -250,9 +318,22 @@ coord_listbox: tk.Listbox
 list_count_label: tk.Label
 location_name_label: tk.Label
 
+# 巡邏控制器全域單例
+patrol_controller = None
+_list_editor_win = None
+
+def refresh_main_listbox():
+    """根據 coord_list_items 重新渲染右側 Listbox 和筆數標籤。"""
+    coord_listbox.delete(0, tk.END)
+    for item in coord_list_items:
+        coord_listbox.insert(tk.END, item["name"])
+    list_count_label.config(text=f"共 {len(coord_list_items)} 筆")
+
 def load_coord_list():
+    initial = HISTORY_DIR if os.path.isdir(HISTORY_DIR) else SCRIPT_DIR
     filepath = filedialog.askopenfilename(
         title="選擇座標清單",
+        initialdir=initial,
         filetypes=[("JSON 檔案", "*.json"), ("所有檔案", "*.*")]
     )
     if not filepath:
@@ -266,12 +347,12 @@ def load_coord_list():
             for item in data:
                 if "lat" in item and "lng" in item:
                     name = item.get("name", f"{item['lat']}, {item['lng']}")
-                    coord_list_items.append({"name": name, "lat": str(item["lat"]), "lng": str(item["lng"])})
+                    coord_list_items.append({"name": name, "lat": str(item["lat"]), "lng": str(item["lng"]), "dwell": int(item.get("dwell", 60))})
                     coord_listbox.insert(tk.END, name)
         elif isinstance(data, dict):
             for name, coords in data.items():
                 if "lat" in coords and "lng" in coords:
-                    coord_list_items.append({"name": name, "lat": str(coords["lat"]), "lng": str(coords["lng"])})
+                    coord_list_items.append({"name": name, "lat": str(coords["lat"]), "lng": str(coords["lng"]), "dwell": int(coords.get("dwell", 60))})
                     coord_listbox.insert(tk.END, name)
         list_count_label.config(text=f"共 {len(coord_list_items)} 筆")
         status.config(text=f"✅ 已載入 {len(coord_list_items)} 筆座標")
@@ -288,6 +369,286 @@ def on_coord_list_select(event):
     lng_entry.delete(0, tk.END)
     lng_entry.insert(0, item["lng"])
     set_location()
+
+# ── 巡邏控制器 ──────────────────────────────────────────────────────────────
+
+class PatrolController:
+    """控制自動巡邏執行緒的生命週期（暫停/繼續/停止）。"""
+
+    def __init__(self):
+        self._stop_event = threading.Event()
+        self._pause_event = threading.Event()
+        self._pause_event.set()  # 預設不暫停
+        self._thread = None
+        self.is_running = False
+        self.on_tick = None  # callable(idx, name, remaining_secs)
+
+    def start(self, items, start_idx=0):
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._pause_event.set()
+        self.is_running = True
+        self._thread = threading.Thread(
+            target=self._run_loop,
+            args=(list(items), start_idx),
+            daemon=True
+        )
+        self._thread.start()
+
+    def pause(self):
+        self._pause_event.clear()
+
+    def resume(self):
+        self._pause_event.set()
+
+    def stop(self):
+        self._stop_event.set()
+        self._pause_event.set()  # 解除可能的暫停阻塞
+        self.is_running = False
+
+    def _run_loop(self, items, start_idx):
+        import time
+        if not items:
+            self.is_running = False
+            return
+        idx = start_idx
+        while not self._stop_event.is_set():
+            if idx >= len(items):
+                idx = 0
+            item = items[idx]
+            set_location_direct(item["lat"], item["lng"], save_history=False)
+            dwell = max(1, int(item.get("dwell", 60)))
+            for remaining in range(dwell, 0, -1):
+                if self._stop_event.is_set():
+                    self.is_running = False
+                    return
+                # 若暫停中，等待繼續
+                self._pause_event.wait()
+                if self._stop_event.is_set():
+                    self.is_running = False
+                    return
+                if self.on_tick:
+                    try:
+                        self.on_tick(idx, item["name"], remaining)
+                    except Exception:
+                        pass
+                # 分成 10 份 0.1 秒，讓 stop 指令更即時
+                for _ in range(10):
+                    if self._stop_event.is_set():
+                        self.is_running = False
+                        return
+                    time.sleep(0.1)
+            idx += 1
+        self.is_running = False
+
+# ── 清單編輯器視窗 ───────────────────────────────────────────────────────────
+
+class ListEditorWindow:
+    """另開 Toplevel 視窗，提供多行座標輸入與解析，套用後可在主視窗清單面板巡邏。"""
+
+    def __init__(self):
+        self._items: list = []  # 本地解析結果 [{name, lat, lng, dwell}, ...]
+
+        self.win = tk.Toplevel(root)
+        self.win.title("清單編輯器")
+        self.win.geometry("620x440")
+        self.win.resizable(True, True)
+        self.win.protocol("WM_DELETE_WINDOW", self.win.destroy)
+
+        self._build_ui()
+
+    # ── UI 建構 ──────────────────────────────────────────────────────────────
+
+    def _build_ui(self):
+        outer = tk.Frame(self.win, padx=12, pady=10)
+        outer.pack(fill=tk.BOTH, expand=True)
+
+        # 上：輸入區
+        input_lf = tk.LabelFrame(outer, text="輸入座標（每行一筆）", padx=8, pady=8)
+        input_lf.pack(fill=tk.BOTH, expand=True)
+
+        hint_text = (
+            "格式（每行一筆，# 開頭為註解）：\n"
+            "  緯度,經度          →  25.033,121.565\n"
+            "  緯度 經度          →  25.040 121.570\n"
+            "  名稱 緯度 經度     →  台北車站 25.047924 121.517081"
+        )
+        tk.Label(input_lf, text=hint_text, fg="gray", font=("Menlo", 10), justify="left").pack(anchor="w", pady=(0, 4))
+
+        text_frame = tk.Frame(input_lf)
+        text_frame.pack(fill=tk.BOTH, expand=True)
+        vsb = tk.Scrollbar(text_frame)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.text_input = tk.Text(text_frame, height=8, yscrollcommand=vsb.set, font=("Menlo", 12))
+        self.text_input.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.config(command=self.text_input.yview)
+
+        ctrl_row = tk.Frame(input_lf)
+        ctrl_row.pack(fill=tk.X, pady=(6, 0))
+        tk.Label(ctrl_row, text="預設停留秒數：").pack(side=tk.LEFT)
+        self.dwell_entry = tk.Entry(ctrl_row, width=6)
+        self.dwell_entry.insert(0, "60")
+        self.dwell_entry.pack(side=tk.LEFT)
+        tk.Button(ctrl_row, text="✅ 解析並載入", command=self._parse_and_load).pack(side=tk.LEFT, padx=10)
+
+        # 下：結果清單
+        result_lf = tk.LabelFrame(outer, text="解析結果", padx=8, pady=8)
+        result_lf.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+
+        list_top = tk.Frame(result_lf)
+        list_top.pack(fill=tk.X)
+        self.count_label = tk.Label(list_top, text="共 0 筆", fg="gray")
+        self.count_label.pack(side=tk.LEFT)
+        tk.Button(list_top, text="✅ 套用到主視窗", command=self._apply_to_main).pack(side=tk.RIGHT)
+        tk.Button(list_top, text="💾 儲存 JSON", command=self._save_json).pack(side=tk.RIGHT, padx=4)
+
+        lb_frame = tk.Frame(result_lf)
+        lb_frame.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
+        lb_sb = tk.Scrollbar(lb_frame)
+        lb_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.result_lb = tk.Listbox(lb_frame, yscrollcommand=lb_sb.set, height=5, font=("Menlo", 12))
+        self.result_lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        lb_sb.config(command=self.result_lb.yview)
+        self.result_lb.bind("<<ListboxSelect>>", self._on_lb_select)
+
+    # ── 座標解析 ─────────────────────────────────────────────────────────────
+
+    def _parse_lines(self, text: str, default_dwell: int) -> list:
+        items = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            m = re.match(r'^([-\d.]+)\s*,\s*([-\d.]+)$', line)
+            if m:
+                lat, lng = m.group(1), m.group(2)
+                items.append({"name": f"{lat}, {lng}", "lat": lat, "lng": lng, "dwell": default_dwell})
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                try:
+                    lng = parts[-1]
+                    lat = parts[-2]
+                    float(lat)
+                    float(lng)
+                    name = " ".join(parts[:-2]) if len(parts) > 2 else f"{lat}, {lng}"
+                    items.append({"name": name, "lat": lat, "lng": lng, "dwell": default_dwell})
+                except ValueError:
+                    pass
+        return items
+
+    def _parse_and_load(self):
+        try:
+            default_dwell = max(1, int(self.dwell_entry.get().strip()))
+        except ValueError:
+            default_dwell = 60
+        text = self.text_input.get("1.0", tk.END)
+        self._items = self._parse_lines(text, default_dwell)
+        self.result_lb.delete(0, tk.END)
+        for item in self._items:
+            self.result_lb.insert(tk.END, f"{item['name']}  ({item['dwell']}s)")
+        self.count_label.config(text=f"共 {len(self._items)} 筆")
+
+    # ── 互動動作 ─────────────────────────────────────────────────────────────
+
+    def _on_lb_select(self, _event):
+        sel = self.result_lb.curselection()
+        if not sel:
+            return
+        item = self._items[sel[0]]
+        set_location_direct(item["lat"], item["lng"])
+
+    def _apply_to_main(self):
+        coord_list_items.clear()
+        coord_list_items.extend(self._items)
+        refresh_main_listbox()
+        status.config(text=f"✅ 已套用 {len(coord_list_items)} 筆到主視窗")
+
+    def _save_json(self):
+        if not self._items:
+            messagebox.showwarning("清單為空", "請先解析座標", parent=self.win)
+            return
+        filepath = filedialog.asksaveasfilename(
+            title="儲存座標清單",
+            defaultextension=".json",
+            filetypes=[("JSON 檔案", "*.json")],
+            parent=self.win
+        )
+        if not filepath:
+            return
+        try:
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(self._items, f, ensure_ascii=False, indent=2)
+            messagebox.showinfo("儲存成功", f"已儲存 {len(self._items)} 筆", parent=self.win)
+        except Exception as e:
+            messagebox.showerror("儲存失敗", str(e), parent=self.win)
+
+# ── 主視窗巡邏控制函式 ───────────────────────────────────────────────────────
+
+# 巡邏相關全域 UI 元件（在主視窗建立後賦值）
+btn_main_patrol_start: tk.Button
+btn_main_patrol_pause: tk.Button
+btn_main_patrol_stop: tk.Button
+patrol_status_label: tk.Label
+
+def main_patrol_tick(idx, name, remaining):
+    def update():
+        total = len(coord_list_items)
+        patrol_status_label.config(text=f"[{idx+1}/{total}] {name}  {remaining}s")
+        coord_listbox.selection_clear(0, tk.END)
+        coord_listbox.selection_set(idx)
+        coord_listbox.see(idx)
+    root.after(0, update)
+
+def start_main_patrol():
+    global patrol_controller
+    if not coord_list_items:
+        status.config(text="❌ 清單為空，請先載入或套用座標")
+        return
+    if patrol_controller is None:
+        patrol_controller = PatrolController()
+    sel = coord_listbox.curselection()
+    start_idx = sel[0] if sel else 0
+    patrol_controller.on_tick = main_patrol_tick
+    patrol_controller.start(coord_list_items, start_idx)
+    btn_main_patrol_start.config(state=tk.DISABLED)
+    btn_main_patrol_pause.config(state=tk.NORMAL, text="⏸ 暫停")
+    btn_main_patrol_stop.config(state=tk.NORMAL)
+    patrol_status_label.config(text="巡邏中...")
+
+def pause_main_patrol():
+    if not patrol_controller:
+        return
+    if btn_main_patrol_pause.cget("text") == "⏸ 暫停":
+        patrol_controller.pause()
+        btn_main_patrol_pause.config(text="▶ 繼續")
+        patrol_status_label.config(text="已暫停")
+    else:
+        patrol_controller.resume()
+        btn_main_patrol_pause.config(text="⏸ 暫停")
+
+def stop_main_patrol():
+    if patrol_controller:
+        patrol_controller.stop()
+    btn_main_patrol_start.config(state=tk.NORMAL)
+    btn_main_patrol_pause.config(state=tk.DISABLED, text="⏸ 暫停")
+    btn_main_patrol_stop.config(state=tk.DISABLED)
+    patrol_status_label.config(text="")
+
+# ── 開啟清單編輯器（單例） ───────────────────────────────────────────────────
+
+def open_list_editor():
+    global _list_editor_win
+    if _list_editor_win is not None:
+        try:
+            if _list_editor_win.win.winfo_exists():
+                _list_editor_win.win.lift()
+                _list_editor_win.win.focus_force()
+                return
+        except Exception:
+            pass
+    _list_editor_win = ListEditorWindow()
 
 # 載入收藏
 favorites = load_favorites()
@@ -324,6 +685,7 @@ fav_menu.pack(side=tk.LEFT)
 
 tk.Button(fav_frame, text="⭐ 收藏", command=add_favorite).pack(side=tk.LEFT, padx=5)
 tk.Button(fav_frame, text="🗑️ 刪除", command=delete_favorite).pack(side=tk.LEFT)
+tk.Button(fav_frame, text="📥 匯入", command=import_favorites).pack(side=tk.LEFT, padx=5)
 
 update_favorites_menu()
 
@@ -334,6 +696,7 @@ list_frame.grid(row=0, column=5, rowspan=9, sticky="nsew", padx=(20, 0))
 list_top = tk.Frame(list_frame)
 list_top.pack(fill=tk.X, pady=(0, 5))
 tk.Button(list_top, text="📂 載入清單", command=load_coord_list).pack(side=tk.LEFT)
+tk.Button(list_top, text="✏️ 編輯清單", command=open_list_editor).pack(side=tk.LEFT, padx=4)
 list_count_label = tk.Label(list_top, text="")
 list_count_label.pack(side=tk.LEFT, padx=8)
 
@@ -345,6 +708,18 @@ coord_listbox = tk.Listbox(list_scroll_frame, yscrollcommand=scrollbar.set, widt
 coord_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 scrollbar.config(command=coord_listbox.yview)
 coord_listbox.bind("<<ListboxSelect>>", on_coord_list_select)
+
+# 巡邏控制列
+patrol_ctrl_frame = tk.Frame(list_frame)
+patrol_ctrl_frame.pack(fill=tk.X, pady=(5, 0))
+btn_main_patrol_start = tk.Button(patrol_ctrl_frame, text="▶ 巡邏", command=start_main_patrol, width=6)
+btn_main_patrol_start.pack(side=tk.LEFT, padx=(0, 2))
+btn_main_patrol_pause = tk.Button(patrol_ctrl_frame, text="⏸ 暫停", command=pause_main_patrol, state=tk.DISABLED, width=6)
+btn_main_patrol_pause.pack(side=tk.LEFT, padx=2)
+btn_main_patrol_stop = tk.Button(patrol_ctrl_frame, text="⏹ 停止", command=stop_main_patrol, state=tk.DISABLED, width=6)
+btn_main_patrol_stop.pack(side=tk.LEFT, padx=2)
+patrol_status_label = tk.Label(patrol_ctrl_frame, text="", fg="gray", font=("", 9))
+patrol_status_label.pack(side=tk.LEFT, padx=4)
 
 # Google Maps 網址
 tk.Label(frame, text="Google Maps 網址：").grid(row=3, column=0, sticky="w")

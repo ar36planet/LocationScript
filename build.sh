@@ -30,7 +30,7 @@ echo "✅ app.py 打包完成"
 # ── 3. 安裝 PyInstaller（pymobiledevice3 venv）──────────────────
 echo ""
 echo "▶ 安裝 PyInstaller（pymobiledevice3 用）..."
-"$PIPX_VENV/bin/pip" install --quiet pyinstaller
+"$PIPX_VENV/bin/python" -m pip install --quiet pyinstaller
 
 # ── 4. 建立 pymobiledevice3 入口腳本 ────────────────────────────
 echo "▶ 打包 pymobiledevice3..."
