@@ -4,3 +4,5 @@ favorites.json
 build/
 dist/
 *.spec
+.claude/
+route/

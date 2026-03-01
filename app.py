@@ -144,6 +144,12 @@ def import_favorites():
 _tunnel_check_id = None
 _tunnel_window_id = None
 
+# 定位 keep-alive（防止 iOS 自動跳回真實位置）
+_keepalive_lat: str = ""
+_keepalive_lng: str = ""
+_keepalive_id = None
+_KEEPALIVE_MS = 10_000  # 每 10 秒重送一次定位指令
+
 def check_tunnel_status():
     global _tunnel_check_id
     result = subprocess.run(["pgrep", "-f", "pymobiledevice3 remote tunneld"], capture_output=True, text=True)
@@ -178,9 +184,11 @@ def stop_tunnel():
         _tunnel_window_id = None
         return
     script = """do shell script "pkill -9 -f 'pymobiledevice3 remote tunneld'" with administrator privileges"""
-    result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+    subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
     _tunnel_window_id = None
-    if result.returncode == 0:
+    # 用 pgrep 確認程序是否真的消失（osascript exit code 不可靠）
+    check = subprocess.run(["pgrep", "-f", "pymobiledevice3 remote tunneld"], capture_output=True, text=True)
+    if not check.stdout.strip():
         status.config(text="✅ 已停止 tunneld")
     else:
         status.config(text="❌ 停止失敗（可能已取消授權）")
@@ -220,7 +228,43 @@ def parse_coords():
     else:
         status.config(text="❌ 格式錯誤，請輸入如：25.112233,123.123123")
 
-def set_location_direct(lat: str, lng: str, save_history: bool = True):
+def _keepalive_tick():
+    global _keepalive_id
+    if not _keepalive_lat or not _keepalive_lng:
+        return
+    def run():
+        try:
+            proc = subprocess.Popen(
+                [PYMOBILEDEVICE3, "developer", "dvt", "simulate-location", "set", "--",
+                 _keepalive_lat, _keepalive_lng],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        except Exception:
+            pass
+    threading.Thread(target=run, daemon=True).start()
+    _keepalive_id = root.after(_KEEPALIVE_MS, _keepalive_tick)
+
+def _start_keepalive(lat: str, lng: str):
+    global _keepalive_lat, _keepalive_lng, _keepalive_id
+    _keepalive_lat = lat
+    _keepalive_lng = lng
+    if _keepalive_id is not None:
+        root.after_cancel(_keepalive_id)
+    _keepalive_id = root.after(_KEEPALIVE_MS, _keepalive_tick)
+
+def _stop_keepalive():
+    global _keepalive_lat, _keepalive_lng, _keepalive_id
+    _keepalive_lat = ""
+    _keepalive_lng = ""
+    if _keepalive_id is not None:
+        root.after_cancel(_keepalive_id)
+        _keepalive_id = None
+
+def set_location_direct(lat: str, lng: str, save_history: bool = True, _fetch_name: bool = True):
     """直接以參數設定位置，可從任意執行緒安全呼叫。"""
     try:
         lat_f = float(lat)
@@ -259,6 +303,7 @@ def set_location_direct(lat: str, lng: str, save_history: bool = True):
         lng_entry.insert(0, lng)
         status.config(text=f"✅ 已設定：{lat}, {lng}")
         location_name_label.config(text="")
+        _start_keepalive(lat, lng)
     root.after(0, update_ui)
 
     def fetch_name():
@@ -279,7 +324,8 @@ def set_location_direct(lat: str, lng: str, save_history: bool = True):
                 root.after(0, lambda: location_name_label.config(text=name, fg="gray"))
         except Exception:
             pass
-    threading.Thread(target=fetch_name, daemon=True).start()
+    if _fetch_name:
+        threading.Thread(target=fetch_name, daemon=True).start()
 
 def set_location():
     lat = lat_entry.get().strip()
@@ -290,6 +336,7 @@ def set_location():
     set_location_direct(lat, lng)
 
 def clear_location():
+    _stop_keepalive()
     result = subprocess.run(
         [PYMOBILEDEVICE3, "developer", "dvt", "simulate-location", "clear"],
         capture_output=True, text=True
@@ -304,6 +351,7 @@ def on_closing():
     if _tunnel_check_id is not None:
         root.after_cancel(_tunnel_check_id)
         _tunnel_check_id = None
+    _stop_keepalive()
     if patrol_controller and patrol_controller.is_running:
         patrol_controller.stop()
     result = subprocess.run(["pgrep", "-f", "pymobiledevice3 remote tunneld"], capture_output=True, text=True)
@@ -359,7 +407,18 @@ def load_coord_list():
     except Exception as e:
         status.config(text=f"❌ 載入失敗：{str(e)[:50]}")
 
+def clear_coord_list():
+    if patrol_controller and patrol_controller.is_running:
+        status.config(text="❌ 巡邏中，請先停止再清除清單")
+        return
+    coord_list_items.clear()
+    coord_listbox.delete(0, tk.END)
+    list_count_label.config(text="")
+    status.config(text="✅ 已清除清單")
+
 def on_coord_list_select(event):
+    if patrol_controller and patrol_controller.is_running:
+        return  # 巡邏中禁止手動選取，避免鍵盤誤觸打斷行程
     selection = coord_listbox.curselection()
     if not selection:
         return
@@ -369,6 +428,16 @@ def on_coord_list_select(event):
     lng_entry.delete(0, tk.END)
     lng_entry.insert(0, item["lng"])
     set_location()
+
+def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """回傳兩座標間的距離（公尺）。"""
+    import math
+    R = 6_371_000
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    return 2 * R * math.asin(math.sqrt(a))
 
 # ── 巡邏控制器 ──────────────────────────────────────────────────────────────
 
@@ -381,13 +450,19 @@ class PatrolController:
         self._pause_event.set()  # 預設不暫停
         self._thread = None
         self.is_running = False
-        self.on_tick = None  # callable(idx, name, remaining_secs)
+        self.on_tick = None     # callable(idx, name, remaining_secs)
+        self.on_travel = None   # callable(idx_to, name_to, remaining_m)
+        self.on_finish = None   # callable() 走完一輪且不循環時呼叫
+        self._speed_kmh = 0.0
+        self._mode = 'loop'  # 'loop' | 'once' | 'pingpong'
 
-    def start(self, items, start_idx=0):
+    def start(self, items, start_idx=0, speed_kmh=0.0, mode='loop'):
         if self._thread and self._thread.is_alive():
             return
         self._stop_event.clear()
         self._pause_event.set()
+        self._speed_kmh = max(0.0, float(speed_kmh))
+        self._mode = mode  # 'loop' | 'once' | 'pingpong'
         self.is_running = True
         self._thread = threading.Thread(
             target=self._run_loop,
@@ -413,34 +488,98 @@ class PatrolController:
             self.is_running = False
             return
         idx = start_idx
+        direction = 1  # 1=正向, -1=反向（pingpong 用）
+        prev_lat = prev_lng = None
         while not self._stop_event.is_set():
             if idx >= len(items):
+                idx = 0  # loop mode reset（安全保護）
+            if idx < 0:
                 idx = 0
             item = items[idx]
-            set_location_direct(item["lat"], item["lng"], save_history=False)
+            try:
+                target_lat = float(item["lat"])
+                target_lng = float(item["lng"])
+            except (ValueError, KeyError):
+                idx += 1
+                continue
+            # 模擬移動（有前一點且速度 > 0）
+            if prev_lat is not None and self._speed_kmh > 0:
+                if not self._travel_between(prev_lat, prev_lng, target_lat, target_lng, idx, item["name"]):
+                    break
+            else:
+                set_location_direct(item["lat"], item["lng"], save_history=False, _fetch_name=False)
+            if self._stop_event.is_set():
+                break
+            prev_lat, prev_lng = target_lat, target_lng
+            # 停留倒數
             dwell = max(1, int(item.get("dwell", 60)))
             for remaining in range(dwell, 0, -1):
                 if self._stop_event.is_set():
-                    self.is_running = False
-                    return
-                # 若暫停中，等待繼續
+                    break
                 self._pause_event.wait()
                 if self._stop_event.is_set():
-                    self.is_running = False
-                    return
+                    break
                 if self.on_tick:
                     try:
                         self.on_tick(idx, item["name"], remaining)
                     except Exception:
                         pass
-                # 分成 10 份 0.1 秒，讓 stop 指令更即時
                 for _ in range(10):
                     if self._stop_event.is_set():
-                        self.is_running = False
-                        return
+                        break
                     time.sleep(0.1)
-            idx += 1
+                if self._stop_event.is_set():
+                    break
+            if self._stop_event.is_set():
+                break
+            idx += direction
+            if self._mode == 'pingpong':
+                if idx >= len(items):
+                    direction = -1
+                    idx = max(0, len(items) - 2)
+                elif idx < 0:
+                    direction = 1
+                    idx = min(len(items) - 1, 1)
+            elif self._mode == 'once' and idx >= len(items):
+                break  # 走完一輪停止
         self.is_running = False
+        if not self._stop_event.is_set() and self.on_finish:
+            try:
+                self.on_finish()
+            except Exception:
+                pass
+
+    def _travel_between(self, lat1, lng1, lat2, lng2, idx_to, name_to) -> bool:
+        """從 (lat1,lng1) 以 self._speed_kmh 模擬移動至 (lat2,lng2)。
+        回傳 True 表示正常抵達，False 表示中途停止。"""
+        import time
+        dist_m = _haversine(lat1, lng1, lat2, lng2)
+        if dist_m < 5:
+            set_location_direct(str(lat2), str(lng2), save_history=False, _fetch_name=False)
+            return True
+        speed_mps = self._speed_kmh * 1000 / 3600
+        STEP_S = 5  # 每 5 秒送一次定位指令
+        n_steps = max(1, round(dist_m / (speed_mps * STEP_S)))
+        for step in range(1, n_steps + 1):
+            if self._stop_event.is_set():
+                return False
+            self._pause_event.wait()
+            if self._stop_event.is_set():
+                return False
+            t = step / n_steps
+            lat = lat1 + (lat2 - lat1) * t
+            lng = lng1 + (lng2 - lng1) * t
+            set_location_direct(str(lat), str(lng), save_history=False, _fetch_name=False)
+            if self.on_travel:
+                try:
+                    self.on_travel(idx_to, name_to, dist_m * (1 - t))
+                except Exception:
+                    pass
+            for _ in range(STEP_S * 10):  # 0.1s × (STEP_S×10) = STEP_S 秒
+                if self._stop_event.is_set():
+                    return False
+                time.sleep(0.1)
+        return True
 
 # ── 清單編輯器視窗 ───────────────────────────────────────────────────────────
 
@@ -511,6 +650,29 @@ class ListEditorWindow:
         self.result_lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         lb_sb.config(command=self.result_lb.yview)
         self.result_lb.bind("<<ListboxSelect>>", self._on_lb_select)
+
+    # ── 帶入現有清單 ─────────────────────────────────────────────────────────
+
+    def load_from_items(self, items: list):
+        """以主視窗現有清單預填文字輸入區並觸發解析。"""
+        if not items:
+            return
+        lines = []
+        for it in items:
+            name = it.get("name", "")
+            lat = it.get("lat", "")
+            lng = it.get("lng", "")
+            # 若 name 只是預設的座標字串，改用 lat,lng 格式
+            if name and name != f"{lat}, {lng}":
+                lines.append(f"{name} {lat} {lng}")
+            else:
+                lines.append(f"{lat},{lng}")
+        self.text_input.delete("1.0", tk.END)
+        self.text_input.insert("1.0", "\n".join(lines))
+        # 以第一筆的 dwell 作為預設停留秒數
+        self.dwell_entry.delete(0, tk.END)
+        self.dwell_entry.insert(0, str(items[0].get("dwell", 60)))
+        self._parse_and_load()
 
     # ── 座標解析 ─────────────────────────────────────────────────────────────
 
@@ -591,6 +753,25 @@ btn_main_patrol_start: tk.Button
 btn_main_patrol_pause: tk.Button
 btn_main_patrol_stop: tk.Button
 patrol_status_label: tk.Label
+patrol_speed_entry: tk.Entry
+patrol_mode_var: tk.StringVar
+
+def on_patrol_finish():
+    def update():
+        btn_main_patrol_start.config(state=tk.NORMAL)
+        btn_main_patrol_pause.config(state=tk.DISABLED, text="⏸ 暫停")
+        btn_main_patrol_stop.config(state=tk.DISABLED)
+        patrol_status_label.config(text="✅ 巡邏完成")
+    root.after(0, update)
+
+def main_patrol_travel(idx_to, name_to, remaining_m):
+    def update():
+        dist_str = f"{remaining_m/1000:.1f}km" if remaining_m >= 1000 else f"{remaining_m:.0f}m"
+        patrol_status_label.config(text=f"🚶 → {name_to}  {dist_str}")
+        coord_listbox.selection_clear(0, tk.END)
+        coord_listbox.selection_set(idx_to)
+        coord_listbox.see(idx_to)
+    root.after(0, update)
 
 def main_patrol_tick(idx, name, remaining):
     def update():
@@ -610,8 +791,14 @@ def start_main_patrol():
         patrol_controller = PatrolController()
     sel = coord_listbox.curselection()
     start_idx = sel[0] if sel else 0
+    try:
+        speed = max(0.0, float(patrol_speed_entry.get().strip()))
+    except ValueError:
+        speed = 20.0
     patrol_controller.on_tick = main_patrol_tick
-    patrol_controller.start(coord_list_items, start_idx)
+    patrol_controller.on_travel = main_patrol_travel
+    patrol_controller.on_finish = on_patrol_finish
+    patrol_controller.start(coord_list_items, start_idx, speed_kmh=speed, mode=patrol_mode_var.get())
     btn_main_patrol_start.config(state=tk.DISABLED)
     btn_main_patrol_pause.config(state=tk.NORMAL, text="⏸ 暫停")
     btn_main_patrol_stop.config(state=tk.NORMAL)
@@ -649,6 +836,8 @@ def open_list_editor():
         except Exception:
             pass
     _list_editor_win = ListEditorWindow()
+    if coord_list_items:
+        _list_editor_win.load_from_items(coord_list_items)
 
 # 載入收藏
 favorites = load_favorites()
@@ -697,6 +886,7 @@ list_top = tk.Frame(list_frame)
 list_top.pack(fill=tk.X, pady=(0, 5))
 tk.Button(list_top, text="📂 載入清單", command=load_coord_list).pack(side=tk.LEFT)
 tk.Button(list_top, text="✏️ 編輯清單", command=open_list_editor).pack(side=tk.LEFT, padx=4)
+tk.Button(list_top, text="🗑️ 清除", command=clear_coord_list).pack(side=tk.LEFT)
 list_count_label = tk.Label(list_top, text="")
 list_count_label.pack(side=tk.LEFT, padx=8)
 
@@ -718,8 +908,20 @@ btn_main_patrol_pause = tk.Button(patrol_ctrl_frame, text="⏸ 暫停", command=
 btn_main_patrol_pause.pack(side=tk.LEFT, padx=2)
 btn_main_patrol_stop = tk.Button(patrol_ctrl_frame, text="⏹ 停止", command=stop_main_patrol, state=tk.DISABLED, width=6)
 btn_main_patrol_stop.pack(side=tk.LEFT, padx=2)
-patrol_status_label = tk.Label(patrol_ctrl_frame, text="", fg="gray", font=("", 9))
-patrol_status_label.pack(side=tk.LEFT, padx=4)
+patrol_status_label = tk.Label(list_frame, text="", fg="gray", font=("", 9), anchor="w")
+patrol_status_label.pack(fill=tk.X, pady=(2, 0))
+
+speed_row = tk.Frame(list_frame)
+speed_row.pack(fill=tk.X, pady=(2, 0))
+tk.Label(speed_row, text="速度：", font=("", 9)).pack(side=tk.LEFT)
+patrol_speed_entry = tk.Entry(speed_row, width=5, font=("", 9))
+patrol_speed_entry.insert(0, "20")
+patrol_speed_entry.pack(side=tk.LEFT)
+tk.Label(speed_row, text="km/h（0＝直跳）", font=("", 9), fg="gray").pack(side=tk.LEFT, padx=(2, 0))
+patrol_mode_var = tk.StringVar(value="loop")
+tk.Radiobutton(speed_row, text="循環", variable=patrol_mode_var, value="loop", font=("", 9)).pack(side=tk.LEFT, padx=(6, 0))
+tk.Radiobutton(speed_row, text="來回", variable=patrol_mode_var, value="pingpong", font=("", 9)).pack(side=tk.LEFT, padx=(2, 0))
+tk.Radiobutton(speed_row, text="單次", variable=patrol_mode_var, value="once", font=("", 9)).pack(side=tk.LEFT, padx=(2, 0))
 
 # Google Maps 網址
 tk.Label(frame, text="Google Maps 網址：").grid(row=3, column=0, sticky="w")
