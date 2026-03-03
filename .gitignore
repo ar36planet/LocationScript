@@ -7,3 +7,4 @@ dist/
 .claude/
 route/
 __pycache__/
+*.png
