@@ -45,7 +45,17 @@ chmod +x install.sh
 安裝完成後會在資料夾內產生 **iOS虛擬定位.app**。
 如無法啟用 app，請在終端機輸入 `python3 app.py`（資料夾路徑需正確）。
 
-> **更新程式碼後重新打包**：若修改了 `app.py`，可執行 `./build.sh` 重新產生 .app，不需重新執行 `install.sh`。
+> **更新程式碼後重新打包**：若修改了 `app.py`，執行 `./build.sh` 重新產生 .app，不需重新執行 `install.sh`。
+>
+> ```bash
+> ./build.sh
+> ```
+>
+> 若 spec 結構有大改（如新增/移除 EXE），建議先清除舊的 build：
+>
+> ```bash
+> rm -rf build dist && ./build.sh
+> ```
 
 ## 使用方式
 
