@@ -38,10 +38,11 @@ jobs:
         run: |
           ~/.local/bin/pyinstaller ifly.spec --noconfirm
 
-      - name: Package CLI
+      - name: Sign and package CLI
         run: |
+          codesign --force --deep --sign - dist/ifly
           cd dist
-          zip -r "ifly-${{ steps.version.outputs.version }}-macos.zip" ifly/
+          zip "ifly-${{ steps.version.outputs.version }}-macos.zip" ifly
 
       # ── GUI ────────────────────────────────────────────────────────────────
       - name: Build GUI app

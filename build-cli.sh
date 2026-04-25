@@ -33,6 +33,8 @@ rm -rf "$RELEASE_DIR"
 mkdir -p "$RELEASE_DIR"
 cp "$SCRIPT_DIR/dist/ifly" "$RELEASE_DIR/ifly"
 chmod +x "$RELEASE_DIR/ifly"
+echo "    Ad-hoc signing..."
+codesign --force --deep --sign - "$RELEASE_DIR/ifly"
 
 # 3. Zip
 echo "[3/3] Creating $ZIP_NAME..."

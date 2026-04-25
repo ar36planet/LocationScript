@@ -73,6 +73,18 @@ ifly doctor
 
 > **開發者（原始碼）**：執行 `bash setup.sh` 進行設定。
 
+### AI Agent 整合（MCP）
+
+安裝完成後，可選擇將 ifly 註冊為 MCP server，讓 AI 工具直接呼叫：
+
+```bash
+ifly agent-setup gemini    # Gemini CLI
+ifly agent-setup claude    # Claude Code
+ifly agent-setup codex     # OpenAI Codex
+```
+
+設定完成後，AI 工具啟動時會自動載入 ifly 的 16 個工具（定位、移動、Tunnel、收藏等），無需手動輸入指令。
+
 ---
 
 ## 使用方式
@@ -305,7 +317,7 @@ ifly --json location parse --google-url "<URL>"
 
 | | 原始碼版（`python3 app.py`） | 打包版（.app） | CLI（ifly） |
 |---|---|---|---|
-| 收藏地點 (`favorites.json`) | 專案資料夾內 | `~/Library/Application Support/iOS虛擬定位/` | 專案資料夾內 |
+| 收藏地點 (`favorites.json`) | 專案資料夾內 | `~/Library/Application Support/iOS虛擬定位/` | `~/Library/Application Support/iOS虛擬定位/`（與打包版共用）|
 | 歷史紀錄 (`history/`) | 專案資料夾內 | `~/Library/Application Support/iOS虛擬定位/history/` | — |
 | 重新打包 | 不需要 | 修改後執行 `./build.sh` | 不需要 |
 | 圖形介面 | 有 | 有 | 無 |

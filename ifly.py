@@ -268,6 +268,9 @@ def _handle_install(_args) -> Result:
     try:
         _run(["sudo", "cp", ifly_src, IFLY_LINK])
         _run(["sudo", "chmod", "755", IFLY_LINK])
+        subprocess.run(["sudo", "xattr", "-d", "com.apple.quarantine", IFLY_LINK],
+                       capture_output=True)  # ignore error if attribute not present
+        _run(["sudo", "codesign", "--force", "--deep", "--sign", "-", IFLY_LINK])
     except subprocess.CalledProcessError as e:
         return Result(False, "EXEC_ERROR", f"Failed to install ifly binary: {e}")
     print("      Done.", flush=True)
@@ -331,11 +334,87 @@ def _handle_install(_args) -> Result:
     print("      Done.", flush=True)
 
     print("\n", flush=True)
+    print("Optional: integrate with AI agents")
+    print("  ifly agent-setup gemini    # Gemini CLI")
+    print("  ifly agent-setup claude    # Claude Code")
+    print("  ifly agent-setup codex     # OpenAI Codex\n", flush=True)
     return Result(True, "INSTALL_OK", "Installation complete — run 'ifly doctor' to verify", data={
         "ifly": IFLY_LINK,
         "tunneld_wrapper": WRAPPER,
         "pymobiledevice3": cmd_path,
     })
+
+
+def _handle_mcp(_args):
+    from core.mcp_server import run as mcp_run
+    mcp_run()
+    return None
+
+
+def _handle_agent_setup(args) -> Result:
+    tool = args.tool
+    if tool == "gemini":
+        return _setup_gemini()
+    if tool == "claude":
+        return _setup_claude()
+    if tool == "codex":
+        return _setup_codex()
+    return Result(False, "PARAM_ERROR", f"Unknown tool: {tool}")
+
+
+def _setup_gemini() -> Result:
+    settings_path = os.path.expanduser("~/.gemini/settings.json")
+    try:
+        with open(settings_path) as f:
+            settings = json.load(f)
+    except FileNotFoundError:
+        settings = {}
+    except json.JSONDecodeError:
+        return Result(False, "EXEC_ERROR", f"Cannot parse {settings_path}")
+
+    settings.setdefault("mcpServers", {})["ifly"] = {"command": "ifly", "args": ["mcp"]}
+
+    try:
+        with open(settings_path, "w") as f:
+            json.dump(settings, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+    except Exception as e:
+        return Result(False, "EXEC_ERROR", f"Failed to write {settings_path}: {e}")
+
+    return Result(True, "OK", f"ifly MCP server registered in {settings_path}",
+                  data={"config_file": settings_path})
+
+
+def _setup_claude() -> Result:
+    try:
+        proc = subprocess.run(
+            ["claude", "mcp", "add", "ifly", "--", "ifly", "mcp"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if proc.returncode != 0:
+            msg = (proc.stderr or proc.stdout or "").strip()[:160]
+            return Result(False, "EXEC_ERROR", f"claude mcp add failed: {msg}")
+        return Result(True, "OK", "ifly MCP server registered in Claude Code")
+    except FileNotFoundError:
+        return Result(False, "ENV_ERROR", "claude CLI not found. Install Claude Code first.")
+    except Exception as e:
+        return Result(False, "EXEC_ERROR", str(e))
+
+
+def _setup_codex() -> Result:
+    try:
+        proc = subprocess.run(
+            ["codex", "mcp", "add", "ifly", "--", "ifly", "mcp"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if proc.returncode != 0:
+            msg = (proc.stderr or proc.stdout or "").strip()[:160]
+            return Result(False, "EXEC_ERROR", f"codex mcp add failed: {msg}")
+        return Result(True, "OK", "ifly MCP server registered in Codex")
+    except FileNotFoundError:
+        return Result(False, "ENV_ERROR", "codex CLI not found. Install Codex first.")
+    except Exception as e:
+        return Result(False, "EXEC_ERROR", str(e))
 
 
 def _handle_doctor(_args) -> Result:
@@ -507,6 +586,17 @@ def build_parser() -> argparse.ArgumentParser:
     install = top.add_parser("install", help="One-time setup: install ifly, configure tunneld and sudoers")
     install.set_defaults(handler=_handle_install)
 
+    mcp = top.add_parser("mcp", help="Start MCP stdio server (for AI agent integration)")
+    mcp.set_defaults(handler=_handle_mcp)
+
+    agent_setup = top.add_parser("agent-setup", help="Register ifly MCP server with an AI tool")
+    agent_setup.add_argument(
+        "tool",
+        choices=["gemini", "claude", "codex"],
+        help="AI tool to configure: gemini | claude | codex",
+    )
+    agent_setup.set_defaults(handler=_handle_agent_setup)
+
     return parser
 
 
@@ -517,6 +607,9 @@ def main(argv=None) -> int:
         result = args.handler(args)
     except Exception as e:
         result = Result(False, "UNEXPECTED_ERROR", f"Unexpected error: {e}")
+
+    if result is None:
+        return 0
 
     if args.as_json:
         print(result.to_json())

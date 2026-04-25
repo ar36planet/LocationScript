@@ -340,10 +340,71 @@ def move_location_run(start_lat: float, start_lng: float,
     return set_location(str(end_lat), str(end_lng), fetch_name=True)
 
 
+def _build_move_script(pmd3: str, udid_args: list[str],
+                        start_lat: float, start_lng: float,
+                        end_lat: float, end_lng: float,
+                        steps: int) -> str:
+    """Generate a self-contained Python script for the move worker.
+    Used in frozen mode to avoid spawning another PyInstaller binary."""
+    return f"""
+import subprocess, time, os, json
+
+PMD3 = {pmd3!r}
+UDID_ARGS = {udid_args!r}
+PID_FILE = {_PID_FILE!r}
+INTERVAL = {_MOVE_INTERVAL}
+
+positions = [
+    (
+        {start_lat!r} + (i / {steps}) * ({end_lat!r} - {start_lat!r}),
+        {start_lng!r} + (i / {steps}) * ({end_lng!r} - {start_lng!r}),
+    )
+    for i in range(1, {steps} + 1)
+]
+
+def kill_existing():
+    subprocess.run(["pkill", "-9", "-f", "simulate-location set"], capture_output=True)
+    try:
+        os.unlink(PID_FILE)
+    except FileNotFoundError:
+        pass
+
+def set_loc(lat, lng):
+    kill_existing()
+    proc = subprocess.Popen(
+        [PMD3, "developer", "dvt", "simulate-location", "set",
+         *UDID_ARGS, "--", str(round(lat, 8)), str(round(lng, 8))],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    with open(PID_FILE, "w") as f:
+        json.dump({{"pid": proc.pid, "lat": str(round(lat, 8)), "lng": str(round(lng, 8))}}, f)
+    time.sleep(2)
+    if proc.poll() is not None and proc.returncode != 0:
+        try:
+            os.unlink(PID_FILE)
+        except FileNotFoundError:
+            pass
+        return False
+    return True
+
+for i, (lat, lng) in enumerate(positions):
+    if not set_loc(lat, lng):
+        break
+    if i < len(positions) - 1:
+        time.sleep(max(0, INTERVAL - 2))
+"""
+
+
 def move_location_start(bearing_deg: float, distance_km: float, speed_kmh: float) -> Result:
     state = _read_pid_state()
     if not (state.get("lat") and state.get("lng")):
         return Result(False, "ENV_ERROR", "No current location. Use 'location set' first.")
+
+    # Resolve device UDID before starting worker (worker has no UI to prompt)
+    udid = _udid_args()
+    if isinstance(udid, Result):
+        return udid
 
     start_lat = float(state["lat"])
     start_lng = float(state["lng"])
@@ -352,21 +413,35 @@ def move_location_start(bearing_deg: float, distance_km: float, speed_kmh: float
 
     _kill_move()
 
+    log_path = os.path.join(os.path.dirname(_PID_FILE), "move_worker.log")
     try:
-        worker_cmd = (
-            [_IFLY_SCRIPT]  # frozen: ifly binary
-            if getattr(sys, "frozen", False)
-            else [sys.executable, _IFLY_SCRIPT]  # source: python3 ifly.py
-        )
-        proc = subprocess.Popen(
-            [*worker_cmd, "_move_worker",
-             "--start-lat", str(start_lat), "--start-lng", str(start_lng),
-             "--end-lat", str(end_lat), "--end-lng", str(end_lng),
-             "--speed", str(speed_kmh), "--distance", str(distance_km)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        log_file = open(log_path, "w")
+        if getattr(sys, "frozen", False):
+            # Frozen mode: spawning another PyInstaller onefile binary causes
+            # "Failed to import encodings module". Use system python3 instead.
+            import shutil as _shutil
+            python3 = _shutil.which("python3") or _shutil.which("python")
+            if not python3:
+                return Result(False, "ENV_ERROR", "python3 not found — cannot start move worker")
+            steps = max(1, int(total_seconds / _MOVE_INTERVAL))
+            script = _build_move_script(PYMOBILEDEVICE3, udid, start_lat, start_lng,
+                                        end_lat, end_lng, steps)
+            proc = subprocess.Popen(
+                [python3, "-c", script],
+                stdout=log_file, stderr=log_file,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        else:
+            proc = subprocess.Popen(
+                [sys.executable, _IFLY_SCRIPT, "_move_worker",
+                 "--start-lat", str(start_lat), "--start-lng", str(start_lng),
+                 "--end-lat", str(end_lat), "--end-lng", str(end_lng),
+                 "--speed", str(speed_kmh), "--distance", str(distance_km)],
+                stdout=log_file, stderr=log_file,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
     except (OSError, FileNotFoundError) as e:
         return Result(False, "EXEC_ERROR", f"Failed to start move worker: {e}")
 
@@ -382,7 +457,7 @@ def move_location_start(bearing_deg: float, distance_km: float, speed_kmh: float
 def move_location_stop() -> Result:
     state = _read_move_state()
     if not state.get("pid"):
-        return Result(False, "ENV_ERROR", "No move in progress")
+        return Result(True, "MOVE_IDLE", "No move in progress")
     _kill_move()
     return Result(True, "MOVE_STOPPED", "Movement stopped")
 
