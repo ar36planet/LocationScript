@@ -3,8 +3,8 @@ favorites.json
 .build_venv/
 build/
 dist/
-*.spec
 .claude/
 route/
 __pycache__/
 *.png
+default_device_udid.txt

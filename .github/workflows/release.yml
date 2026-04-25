@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pipx
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pipx
+          python -m pipx ensurepath
+
+      - name: Install pymobiledevice3 + PyInstaller
+        run: |
+          pipx install pymobiledevice3
+          pipx inject pymobiledevice3 pyinstaller
+
+      - name: Read version
+        id: version
+        run: echo "version=$(python3 -c 'from version import __version__; print(__version__)')" >> "$GITHUB_OUTPUT"
+
+      # ── CLI ────────────────────────────────────────────────────────────────
+      - name: Build ifly CLI
+        run: |
+          ~/.local/bin/pyinstaller ifly.spec --noconfirm
+
+      - name: Package CLI
+        run: |
+          cd dist
+          zip -r "ifly-${{ steps.version.outputs.version }}-macos.zip" ifly/
+
+      # ── GUI ────────────────────────────────────────────────────────────────
+      - name: Build GUI app
+        run: |
+          ~/.local/bin/pyinstaller iOS虛擬定位.spec --noconfirm
+
+      - name: Package GUI
+        run: |
+          cd dist
+          zip -r "iOS虛擬定位-${{ steps.version.outputs.version }}-macos.zip" iOS虛擬定位.app/
+
+      # ── Release ────────────────────────────────────────────────────────────
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "v${{ steps.version.outputs.version }}"
+          body: |
+            ## ifly CLI
+            下載 `ifly-*-macos.zip`，解壓後執行：
+            ```bash
+            ./ifly install
+            ```
+
+            ## iOS 虛擬定位（GUI）
+            下載 `iOS虛擬定位-*-macos.zip`，解壓後拖入 `/Applications/`。
+          files: |
+            dist/ifly-${{ steps.version.outputs.version }}-macos.zip
+            dist/iOS虛擬定位-${{ steps.version.outputs.version }}-macos.zip

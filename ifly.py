@@ -7,12 +7,16 @@ import subprocess
 import sys
 
 import config
-from core.location_service import clear_location, parse_coords, parse_google_url, set_location
+import version
+from core.location_service import (
+    clear_location, location_status, parse_coords, parse_google_url, set_location,
+    move_location_run, move_location_start, move_location_stop, move_location_status,
+)
 from core.result import Result
 from core.storage_service import add_favorite, delete_favorite, import_favorites, list_favorites
-from core.tunnel_service import find_pymobiledevice3, start_tunnel, status as tunnel_status, stop_tunnel
+from core.tunnel_service import find_pymobiledevice3, start_tunnel, status as tunnel_status, stop_tunnel, wait_for_ready
 
-DEVICE_DEFAULT_FILE = os.path.join(config.SCRIPT_DIR, "default_device_udid.txt")
+DEVICE_DEFAULT_FILE = config.DEFAULT_UDID_FILE
 
 
 def _load_default_udid() -> str:
@@ -122,12 +126,65 @@ def _handle_device_select(args) -> Result:
     return Result(True, "OK", f"Device selected: {udid}", data={"udid": udid, "default": False})
 
 
+_COMPASS_BEARINGS = {
+    "N": 0.0, "NE": 45.0, "E": 90.0, "SE": 135.0,
+    "S": 180.0, "SW": 225.0, "W": 270.0, "NW": 315.0,
+}
+
+
+def _parse_direction(value: str) -> float | None:
+    upper = value.strip().upper()
+    if upper in _COMPASS_BEARINGS:
+        return _COMPASS_BEARINGS[upper]
+    try:
+        deg = float(value)
+        if 0.0 <= deg <= 360.0:
+            return deg
+    except ValueError:
+        pass
+    return None
+
+
 def _handle_location_set(args) -> Result:
-    return set_location(str(args.lat), str(args.lng), fetch_name=False)
+    if args.name:
+        favs_result = list_favorites()
+        if not favs_result.ok:
+            return favs_result
+        favs = favs_result.data.get("favorites", {})
+        if args.name not in favs:
+            return Result(False, "PARAM_ERROR", f"Favorite not found: '{args.name}'")
+        lat = favs[args.name]["lat"]
+        lng = favs[args.name]["lng"]
+    else:
+        if args.lat is None or args.lng is None:
+            return Result(False, "PARAM_ERROR", "Provide --lat/--lng or --name")
+        lat, lng = str(args.lat), str(args.lng)
+    return set_location(lat, lng, fetch_name=True)
+
+
+def _handle_tunnel_restart(args) -> Result:
+    stop_tunnel()
+    result = start_tunnel(headless=not getattr(args, "interactive", False))
+    if not result.ok:
+        return result
+    if getattr(args, "wait", False):
+        ready = wait_for_ready(timeout=args.timeout)
+        if not ready:
+            return Result(False, "EXEC_ERROR", f"Tunnel restarted but no device ready within {args.timeout}s")
+        return Result(True, result.code, result.message + " (device ready)", data=result.data)
+    return result
 
 
 def _handle_tunnel_start(args) -> Result:
-    return start_tunnel(headless=not args.interactive)
+    result = start_tunnel(headless=not args.interactive)
+    if not result.ok:
+        return result
+    if args.wait:
+        ready = wait_for_ready(timeout=args.timeout)
+        if not ready:
+            return Result(False, "EXEC_ERROR", f"Tunnel started but no device ready within {args.timeout}s")
+        return Result(True, result.code, result.message + " (device ready)", data=result.data)
+    return result
 
 
 def _handle_location_parse(args) -> Result:
@@ -135,17 +192,150 @@ def _handle_location_parse(args) -> Result:
         parsed = parse_google_url(args.google_url)
         if not parsed:
             return Result(False, "PARAM_ERROR", "Cannot parse URL")
-        lat, lng, label = parsed
-        return Result(True, "OK", "Parsed successfully", data={"lat": lat, "lng": lng, "label": label})
+        lat, lng, _ = parsed
 
-    if args.coords:
+    elif args.coords:
         parsed = parse_coords(args.coords)
         if not parsed:
             return Result(False, "PARAM_ERROR", "Invalid coords format")
         lat, lng = parsed
-        return Result(True, "OK", "Parsed successfully", data={"lat": lat, "lng": lng})
 
-    return Result(False, "PARAM_ERROR", "Provide --google-url or --coords")
+    else:
+        return Result(False, "PARAM_ERROR", "Provide --google-url or --coords")
+
+    return set_location(lat, lng, fetch_name=True)
+
+
+def _handle_location_move_start(args) -> Result:
+    bearing = _parse_direction(args.direction)
+    if bearing is None:
+        return Result(False, "PARAM_ERROR",
+                      f"Invalid direction '{args.direction}'. Use N/NE/E/SE/S/SW/W/NW or 0–360")
+    if args.distance <= 0:
+        return Result(False, "PARAM_ERROR", "Distance must be > 0")
+    if args.speed <= 0:
+        return Result(False, "PARAM_ERROR", "Speed must be > 0")
+    return move_location_start(bearing, args.distance, args.speed)
+
+
+def _handle_move_worker(args) -> Result:
+    return move_location_run(
+        args.start_lat, args.start_lng,
+        args.end_lat, args.end_lng,
+        args.speed, args.distance,
+    )
+
+
+def _handle_install(_args) -> Result:
+    import shutil
+
+    USER = os.environ.get("USER") or os.environ.get("LOGNAME") or ""
+    WRAPPER = "/usr/local/bin/ifly-tunneld"
+    STOP_WRAPPER = "/usr/local/bin/ifly-tunneld-stop"
+    SUDOERS_FILE = "/etc/sudoers.d/ifly"
+    IFLY_LINK = "/usr/local/bin/ifly"
+
+    def _step(label: str):
+        print(f"\n{label}", flush=True)
+
+    def _run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
+        return subprocess.run(cmd, check=True, **kwargs)
+
+    # ── find pymobiledevice3 ─────────────────────────────────────────────────
+    _step("[1/5] Checking pymobiledevice3...")
+    cmd_path = None
+    if getattr(sys, "frozen", False):
+        # onefile: binary is extracted to _MEIPASS at runtime
+        meipass = getattr(sys, "_MEIPASS", "")
+        for candidate in [
+            os.path.join(meipass, "pymobiledevice3"),
+            os.path.join(os.path.dirname(sys.executable), "pymobiledevice3"),
+        ]:
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                cmd_path = candidate
+                print(f"      Using bundled binary: {cmd_path}", flush=True)
+                break
+    if not cmd_path:
+        cmd_path = find_pymobiledevice3()
+    if not cmd_path:
+        return Result(False, "ENV_ERROR",
+                      "pymobiledevice3 not found. Install it: pipx install pymobiledevice3")
+    print(f"      {cmd_path}", flush=True)
+
+    # ── copy binary to /usr/local/bin/ifly ──────────────────────────────────
+    _step("[2/5] Installing ifly to /usr/local/bin/ifly...")
+    ifly_src = sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__)
+    try:
+        _run(["sudo", "cp", ifly_src, IFLY_LINK])
+        _run(["sudo", "chmod", "755", IFLY_LINK])
+    except subprocess.CalledProcessError as e:
+        return Result(False, "EXEC_ERROR", f"Failed to install ifly binary: {e}")
+    print("      Done.", flush=True)
+
+    # ── tunneld wrapper ──────────────────────────────────────────────────────
+    _step("[3/5] Creating tunneld start wrapper...")
+    try:
+        _run(["sudo", "cp", cmd_path, WRAPPER])
+        _run(["sudo", "chmod", "755", WRAPPER])
+    except subprocess.CalledProcessError as e:
+        return Result(False, "EXEC_ERROR", f"Failed to create wrapper: {e}")
+    print("      Done.", flush=True)
+
+    # ── tunneld stop wrapper ─────────────────────────────────────────────────
+    _step("[4/5] Creating tunneld stop wrapper...")
+    stop_script = (
+        "#!/bin/sh\n"
+        "pkill -9 -f 'pymobiledevice3 remote tunneld' 2>/dev/null || true\n"
+        "pkill -9 -f 'ifly-tunneld remote tunneld' 2>/dev/null || true\n"
+        "exit 0\n"
+    )
+    try:
+        proc = subprocess.Popen(
+            ["sudo", "tee", STOP_WRAPPER],
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        )
+        _, err = proc.communicate(input=stop_script.encode())
+        if proc.returncode != 0:
+            return Result(False, "EXEC_ERROR", f"Failed to write stop wrapper: {err.decode().strip()[:120]}")
+        _run(["sudo", "chmod", "755", STOP_WRAPPER])
+    except Exception as e:
+        return Result(False, "EXEC_ERROR", f"Failed to create stop wrapper: {e}")
+    print("      Done.", flush=True)
+
+    # ── sudoers ──────────────────────────────────────────────────────────────
+    _step("[5/5] Configuring passwordless sudo for tunnel...")
+    if not USER:
+        return Result(False, "ENV_ERROR", "Cannot determine current user ($USER unset)")
+    sudoers_content = (
+        f"{USER} ALL=(ALL) NOPASSWD: {WRAPPER}\n"
+        f"{USER} ALL=(ALL) NOPASSWD: {STOP_WRAPPER}\n"
+    )
+    try:
+        proc = subprocess.Popen(
+            ["sudo", "tee", SUDOERS_FILE],
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        )
+        _, err = proc.communicate(input=sudoers_content.encode())
+        if proc.returncode != 0:
+            return Result(False, "EXEC_ERROR", f"Failed to write sudoers: {err.decode().strip()[:120]}")
+        _run(["sudo", "chmod", "440", SUDOERS_FILE])
+        check = subprocess.run(
+            ["sudo", "visudo", "-cf", SUDOERS_FILE],
+            capture_output=True, text=True,
+        )
+        if check.returncode != 0:
+            subprocess.run(["sudo", "rm", "-f", SUDOERS_FILE])
+            return Result(False, "EXEC_ERROR", f"sudoers syntax error: {check.stderr.strip()[:120]}")
+    except Exception as e:
+        return Result(False, "EXEC_ERROR", f"sudoers setup failed: {e}")
+    print("      Done.", flush=True)
+
+    print("\n", flush=True)
+    return Result(True, "INSTALL_OK", "Installation complete — run 'ifly doctor' to verify", data={
+        "ifly": IFLY_LINK,
+        "tunneld_wrapper": WRAPPER,
+        "pymobiledevice3": cmd_path,
+    })
 
 
 def _handle_doctor(_args) -> Result:
@@ -177,12 +367,30 @@ def _handle_doctor(_args) -> Result:
             timeout=10,
         )
         checks["sudo_nopasswd_ok"] = sudo_check.returncode == 0
-        checks["sudo_check_output"] = (sudo_check.stdout or sudo_check.stderr or "").strip()
+        raw = (sudo_check.stdout or sudo_check.stderr or "").strip()
+        checks["sudo_check_output"] = raw.splitlines()[0] if raw else ""
     except Exception as e:
         checks["sudo_nopasswd_ok"] = False
         checks["sudo_check_output"] = str(e)
 
-    if checks.get("version_ok") and checks.get("sudo_nopasswd_ok"):
+    from core.location_service import _connected_udids
+    connected = _connected_udids()
+    checks["device_connected"] = len(connected) > 0
+    checks["connected_devices"] = connected
+
+    saved_udid = ""
+    try:
+        with open(config.DEFAULT_UDID_FILE) as f:
+            saved_udid = f.read().strip()
+    except FileNotFoundError:
+        pass
+    checks["default_udid_set"] = bool(saved_udid)
+    checks["default_udid"] = saved_udid or None
+    checks["default_udid_online"] = saved_udid in connected if saved_udid else False
+
+    all_ok = (checks.get("version_ok") and checks.get("sudo_nopasswd_ok")
+              and checks["device_connected"] and (not saved_udid or checks["default_udid_online"]))
+    if all_ok:
         return Result(True, "OK", "All checks passed", data=checks)
     return Result(False, "ENV_ERROR", "Some checks failed", data=checks)
 
@@ -192,6 +400,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="ifly",
         description="iOS virtual location tool — CLI interface for ifly.",
     )
+    parser.add_argument("--version", "-V", action="version", version=f"ifly {version.__version__}")
     parser.add_argument("--json", action="store_true", dest="as_json", help="Output machine-readable JSON")
 
     top = parser.add_subparsers(dest="group", required=True)
@@ -210,10 +419,17 @@ def build_parser() -> argparse.ArgumentParser:
     tunnel_sub = tunnel.add_subparsers(dest="action", required=True)
     tunnel_start = tunnel_sub.add_parser("start", help="Start tunneld in background (requires NOPASSWD sudo)")
     tunnel_start.add_argument("--interactive", action="store_true", help="Prompt for sudo password instead of using NOPASSWD")
+    tunnel_start.add_argument("--wait", action="store_true", help="Wait until a device tunnel is ready before returning")
+    tunnel_start.add_argument("--timeout", type=int, default=15, metavar="SEC", help="Timeout for --wait (default: 15s)")
     tunnel_start.set_defaults(handler=_handle_tunnel_start)
 
     tunnel_stop = tunnel_sub.add_parser("stop", help="Stop tunneld")
     tunnel_stop.set_defaults(handler=lambda _a: stop_tunnel())
+
+    tunnel_restart = tunnel_sub.add_parser("restart", help="Restart tunneld (useful after switching devices)")
+    tunnel_restart.add_argument("--wait", action="store_true", help="Wait until a device tunnel is ready before returning")
+    tunnel_restart.add_argument("--timeout", type=int, default=15, metavar="SEC")
+    tunnel_restart.set_defaults(handler=_handle_tunnel_restart)
 
     tunnel_stat = tunnel_sub.add_parser("status", help="Show tunneld running status")
     tunnel_stat.set_defaults(handler=lambda _a: tunnel_status())
@@ -221,15 +437,35 @@ def build_parser() -> argparse.ArgumentParser:
     location = top.add_parser("location", help="Set or clear simulated GPS location")
     location_sub = location.add_subparsers(dest="action", required=True)
 
-    location_set = location_sub.add_parser("set", help="Set GPS coordinates")
-    location_set.add_argument("--lat", type=float, required=True, help="Latitude (-90 to 90)")
-    location_set.add_argument("--lng", type=float, required=True, help="Longitude (-180 to 180)")
+    location_set = location_sub.add_parser("set", help="Set GPS coordinates or go to a saved favorite")
+    location_set.add_argument("--lat", type=float, default=None, help="Latitude (-90 to 90)")
+    location_set.add_argument("--lng", type=float, default=None, help="Longitude (-180 to 180)")
+    location_set.add_argument("--name", default=None, metavar="NAME", help="Favorite location name")
     location_set.set_defaults(handler=_handle_location_set)
+
+    location_stat = location_sub.add_parser("status", help="Show current virtual location")
+    location_stat.set_defaults(handler=lambda _a: location_status())
 
     location_clear = location_sub.add_parser("clear", help="Clear simulated location")
     location_clear.set_defaults(handler=lambda _a: clear_location())
 
-    location_parse = location_sub.add_parser("parse", help="Parse a Google Maps URL or coordinate string")
+    move = location_sub.add_parser("move", help="Move from current location in a direction")
+    move_sub = move.add_subparsers(dest="action", required=True)
+
+    move_start = move_sub.add_parser("start", help="Start background movement")
+    move_start.add_argument("--direction", required=True, metavar="DIR",
+                            help="Bearing in degrees (0–360) or compass (N/NE/E/SE/S/SW/W/NW)")
+    move_start.add_argument("--distance", type=float, required=True, metavar="KM", help="Distance in km")
+    move_start.add_argument("--speed", type=float, required=True, metavar="KMH", help="Speed in km/h")
+    move_start.set_defaults(handler=_handle_location_move_start)
+
+    move_stop = move_sub.add_parser("stop", help="Stop ongoing movement")
+    move_stop.set_defaults(handler=lambda _a: move_location_stop())
+
+    move_status = move_sub.add_parser("status", help="Show movement progress")
+    move_status.set_defaults(handler=lambda _a: move_location_status())
+
+    location_parse = location_sub.add_parser("parse", help="Parse a Google Maps URL or coordinate string and set location")
     parse_group = location_parse.add_mutually_exclusive_group(required=True)
     parse_group.add_argument("--google-url", metavar="URL", help="Google Maps URL")
     parse_group.add_argument("--coords", metavar="LAT,LNG", help="Coordinate string, e.g. '25.033,121.565'")
@@ -255,8 +491,21 @@ def build_parser() -> argparse.ArgumentParser:
     fav_import.add_argument("--file", required=True, metavar="PATH", help="Path to JSON file")
     fav_import.set_defaults(handler=lambda a: import_favorites(a.file))
 
+    # Internal worker subcommand — not shown in help
+    worker = top.add_parser("_move_worker")
+    worker.add_argument("--start-lat", type=float, required=True)
+    worker.add_argument("--start-lng", type=float, required=True)
+    worker.add_argument("--end-lat", type=float, required=True)
+    worker.add_argument("--end-lng", type=float, required=True)
+    worker.add_argument("--speed", type=float, required=True)
+    worker.add_argument("--distance", type=float, required=True)
+    worker.set_defaults(handler=_handle_move_worker)
+
     doctor = top.add_parser("doctor", help="Check environment: pymobiledevice3, tunnel, sudo permissions")
     doctor.set_defaults(handler=_handle_doctor)
+
+    install = top.add_parser("install", help="One-time setup: install ifly, configure tunneld and sudoers")
+    install.set_defaults(handler=_handle_install)
 
     return parser
 

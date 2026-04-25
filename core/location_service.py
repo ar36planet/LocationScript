@@ -1,15 +1,98 @@
 import json
+import math
 import os
 import re
 import subprocess
+import sys
 import time
 import urllib.parse
 import urllib.request
 
-from config import PYMOBILEDEVICE3
+from config import PYMOBILEDEVICE3, DEFAULT_UDID_FILE
 from core.result import Result
 
+
+def _fetch_raw_devices() -> list[dict]:
+    try:
+        proc = subprocess.run(
+            [PYMOBILEDEVICE3, "usbmux", "list"],
+            capture_output=True, text=True, timeout=8,
+        )
+        return json.loads(proc.stdout or "[]")
+    except Exception:
+        return []
+
+
+def _connected_udids() -> list[str]:
+    """Unique UDIDs of connected devices (deduplicates same device on USB+WiFi)."""
+    seen = {}
+    for d in _fetch_raw_devices():
+        if not isinstance(d, dict):
+            continue
+        udid = d.get("Identifier")
+        if not udid:
+            continue
+        # Prefer USB over WiFi when the same UDID appears on both
+        conn = d.get("ConnectionType", "")
+        if udid not in seen or conn == "USB":
+            seen[udid] = udid
+    return list(seen.values())
+
+
+def list_connected_devices() -> list[dict]:
+    """Unique connected devices with name, ios version and connection type."""
+    seen = {}
+    for d in _fetch_raw_devices():
+        if not isinstance(d, dict):
+            continue
+        udid = d.get("Identifier")
+        if not udid:
+            continue
+        conn = d.get("ConnectionType", "")
+        if udid not in seen or conn == "USB":
+            seen[udid] = {
+                "udid": udid,
+                "name": d.get("DeviceName", ""),
+                "ios": d.get("ProductVersion", ""),
+                "connection": conn,
+            }
+    return list(seen.values())
+
+
+def _udid_args() -> Result | list[str]:
+    """Returns a list of CLI args, or a Result(ok=False) if device selection fails."""
+    connected = _connected_udids()
+
+    if not connected:
+        return Result(False, "ENV_ERROR", "No device connected")
+
+    # Single device: always use it directly, ignore saved default
+    if len(connected) == 1:
+        return ["--tunnel", connected[0]]
+
+    # Multiple devices: require a saved default
+    try:
+        with open(DEFAULT_UDID_FILE) as f:
+            saved = f.read().strip()
+        if saved and saved in connected:
+            return ["--tunnel", saved]
+        if saved:
+            return Result(False, "ENV_ERROR",
+                          f"Default device {saved} is not connected. Run 'ifly device select <UDID> --default'")
+    except FileNotFoundError:
+        pass
+
+    return Result(False, "ENV_ERROR",
+                  "Multiple devices connected. Run 'ifly device select <UDID> --default' to specify one")
+
 _PID_FILE = os.path.expanduser("~/.local/share/ifly/location.pid")
+_MOVE_PID_FILE = os.path.expanduser("~/.local/share/ifly/move.pid")
+_MOVE_INTERVAL = 5  # seconds between location updates during movement
+_IFLY_SCRIPT = (
+    sys.executable  # frozen: ifly binary IS the executable
+    if getattr(sys, "frozen", False)
+    else os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "ifly.py"))
+)
 
 
 def _ensure_dir():
@@ -31,13 +114,11 @@ def _write_pid_state(pid: int, lat: str, lng: str):
 
 
 def _kill_existing():
-    state = _read_pid_state()
-    pid = state.get("pid")
-    if pid:
-        try:
-            os.kill(pid, 9)
-        except (ProcessLookupError, PermissionError):
-            pass
+    # Kill all simulate-location processes (not just the PID-file one)
+    subprocess.run(
+        ["pkill", "-9", "-f", "simulate-location set"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
     try:
         os.unlink(_PID_FILE)
     except FileNotFoundError:
@@ -61,6 +142,72 @@ def parse_coords(text: str) -> tuple | None:
     return None
 
 
+def _write_move_state(pid: int, start_lat: float, start_lng: float,
+                      end_lat: float, end_lng: float, eta_seconds: float) -> None:
+    _ensure_dir()
+    with open(_MOVE_PID_FILE, "w") as f:
+        json.dump({
+            "pid": pid,
+            "start_lat": start_lat, "start_lng": start_lng,
+            "end_lat": end_lat, "end_lng": end_lng,
+            "start_time": time.time(),
+            "eta_seconds": eta_seconds,
+        }, f)
+
+
+def _read_move_state() -> dict:
+    try:
+        with open(_MOVE_PID_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _kill_move() -> None:
+    state = _read_move_state()
+    pid = state.get("pid")
+    if pid:
+        try:
+            os.kill(pid, 9)
+        except (ProcessLookupError, PermissionError):
+            pass
+    try:
+        os.unlink(_MOVE_PID_FILE)
+    except FileNotFoundError:
+        pass
+
+
+def _destination(lat: float, lng: float, bearing_deg: float, distance_km: float) -> tuple[float, float]:
+    R = 6371.0
+    phi1 = math.radians(lat)
+    lam1 = math.radians(lng)
+    theta = math.radians(bearing_deg)
+    delta = distance_km / R
+    phi2 = math.asin(math.sin(phi1) * math.cos(delta) + math.cos(phi1) * math.sin(delta) * math.cos(theta))
+    lam2 = lam1 + math.atan2(
+        math.sin(theta) * math.sin(delta) * math.cos(phi1),
+        math.cos(delta) - math.sin(phi1) * math.sin(phi2),
+    )
+    return math.degrees(phi2), math.degrees(lam2)
+
+
+def _set_location_raw(lat: str, lng: str) -> None:
+    udid = _udid_args()
+    if isinstance(udid, Result):
+        return
+    _kill_existing()
+    try:
+        proc = subprocess.Popen(
+            [PYMOBILEDEVICE3, "developer", "dvt", "simulate-location", "set", *udid, "--", lat, lng],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        _write_pid_state(proc.pid, lat, lng)
+    except (OSError, FileNotFoundError):
+        pass
+
+
 def stop_keepalive() -> None:
     _kill_existing()
 
@@ -77,11 +224,15 @@ def set_location(lat: str, lng: str, keepalive: bool = False, fetch_name: bool =
     if not (-180 <= lng_f <= 180):
         return Result(False, "PARAM_ERROR", "Longitude out of range (-180 to 180)")
 
+    udid = _udid_args()
+    if isinstance(udid, Result):
+        return udid
+
     _kill_existing()
 
     try:
         proc = subprocess.Popen(
-            [PYMOBILEDEVICE3, "developer", "dvt", "simulate-location", "set", "--", lat, lng],
+            [PYMOBILEDEVICE3, "developer", "dvt", "simulate-location", "set", *udid, "--", lat, lng],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
@@ -109,7 +260,7 @@ def set_location(lat: str, lng: str, keepalive: bool = False, fetch_name: bool =
                 payload = json.loads(resp.read())
             name = payload.get("display_name", "")
             if name:
-                data["name"] = name
+                data["addr"] = name
         except Exception:
             pass
 
@@ -117,10 +268,13 @@ def set_location(lat: str, lng: str, keepalive: bool = False, fetch_name: bool =
 
 
 def clear_location() -> Result:
+    udid = _udid_args()
+    if isinstance(udid, Result):
+        return udid
     _kill_existing()
     try:
         proc = subprocess.Popen(
-            [PYMOBILEDEVICE3, "developer", "dvt", "simulate-location", "clear"],
+            [PYMOBILEDEVICE3, "developer", "dvt", "simulate-location", "clear", *udid],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
@@ -132,3 +286,131 @@ def clear_location() -> Result:
         return Result(False, "EXEC_ERROR", f"Subprocess error: {e}")
 
     return Result(True, "LOCATION_CLEARED", "Location cleared")
+
+
+def location_status() -> Result:
+    state = _read_pid_state()
+    if not state.get("lat") or not state.get("lng"):
+        return Result(True, "LOCATION_IDLE", "No virtual location set", data={"active": False})
+
+    pid = state.get("pid")
+    alive = False
+    if pid:
+        try:
+            os.kill(pid, 0)
+            alive = True
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    return Result(
+        True,
+        "LOCATION_ACTIVE" if alive else "LOCATION_STALE",
+        f"Location: {state['lat']}, {state['lng']}",
+        data={"active": alive, "lat": state["lat"], "lng": state["lng"], "pid": pid},
+    )
+
+
+def move_location_run(start_lat: float, start_lng: float,
+                      end_lat: float, end_lng: float,
+                      speed_kmh: float, distance_km: float) -> Result:
+    """Blocking interpolation loop — called by the background worker process."""
+    total_seconds = (distance_km / speed_kmh) * 3600
+    steps = max(1, int(total_seconds / _MOVE_INTERVAL))
+
+    if steps == 1:
+        return set_location(str(end_lat), str(end_lng), fetch_name=True)
+
+    # First step: verify tunnel is working
+    t = 1 / steps
+    lat = str(round(start_lat + t * (end_lat - start_lat), 8))
+    lng = str(round(start_lng + t * (end_lng - start_lng), 8))
+    result = set_location(lat, lng, fetch_name=False)
+    if not result.ok:
+        return result
+
+    for i in range(2, steps):
+        time.sleep(_MOVE_INTERVAL - 2 if i == 2 else _MOVE_INTERVAL)
+        t = i / steps
+        _set_location_raw(
+            str(round(start_lat + t * (end_lat - start_lat), 8)),
+            str(round(start_lng + t * (end_lng - start_lng), 8)),
+        )
+
+    time.sleep(_MOVE_INTERVAL - 2 if steps == 2 else _MOVE_INTERVAL)
+    return set_location(str(end_lat), str(end_lng), fetch_name=True)
+
+
+def move_location_start(bearing_deg: float, distance_km: float, speed_kmh: float) -> Result:
+    state = _read_pid_state()
+    if not (state.get("lat") and state.get("lng")):
+        return Result(False, "ENV_ERROR", "No current location. Use 'location set' first.")
+
+    start_lat = float(state["lat"])
+    start_lng = float(state["lng"])
+    end_lat, end_lng = _destination(start_lat, start_lng, bearing_deg, distance_km)
+    total_seconds = (distance_km / speed_kmh) * 3600
+
+    _kill_move()
+
+    try:
+        worker_cmd = (
+            [_IFLY_SCRIPT]  # frozen: ifly binary
+            if getattr(sys, "frozen", False)
+            else [sys.executable, _IFLY_SCRIPT]  # source: python3 ifly.py
+        )
+        proc = subprocess.Popen(
+            [*worker_cmd, "_move_worker",
+             "--start-lat", str(start_lat), "--start-lng", str(start_lng),
+             "--end-lat", str(end_lat), "--end-lng", str(end_lng),
+             "--speed", str(speed_kmh), "--distance", str(distance_km)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except (OSError, FileNotFoundError) as e:
+        return Result(False, "EXEC_ERROR", f"Failed to start move worker: {e}")
+
+    _write_move_state(proc.pid, start_lat, start_lng, end_lat, end_lng, total_seconds)
+
+    return Result(True, "MOVE_STARTED", f"Moving {distance_km:.2f} km, ETA {int(total_seconds)}s", data={
+        "pid": proc.pid,
+        "eta_seconds": int(total_seconds),
+        "destination": {"lat": round(end_lat, 8), "lng": round(end_lng, 8)},
+    })
+
+
+def move_location_stop() -> Result:
+    state = _read_move_state()
+    if not state.get("pid"):
+        return Result(False, "ENV_ERROR", "No move in progress")
+    _kill_move()
+    return Result(True, "MOVE_STOPPED", "Movement stopped")
+
+
+def move_location_status() -> Result:
+    state = _read_move_state()
+    if not state.get("pid"):
+        return Result(True, "MOVE_IDLE", "No move in progress", data={"running": False})
+
+    pid = state["pid"]
+    try:
+        os.kill(pid, 0)
+        running = True
+    except (ProcessLookupError, PermissionError):
+        running = False
+
+    if not running:
+        _kill_move()
+        return Result(True, "MOVE_DONE", "Movement complete", data={"running": False})
+
+    elapsed = time.time() - state.get("start_time", time.time())
+    eta = state.get("eta_seconds", 0)
+    remaining = max(0, eta - elapsed)
+
+    return Result(True, "MOVE_RUNNING", f"Moving, ~{int(remaining)}s remaining", data={
+        "running": True,
+        "pid": pid,
+        "progress": round(min(1.0, elapsed / eta) if eta else 1.0, 2),
+        "eta_remaining_seconds": int(remaining),
+        "destination": {"lat": state.get("end_lat"), "lng": state.get("end_lng")},
+    })

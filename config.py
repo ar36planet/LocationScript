@@ -29,3 +29,4 @@ else:
 
 FAVORITES_FILE = os.path.join(SCRIPT_DIR, "favorites.json")
 HISTORY_DIR = os.path.join(SCRIPT_DIR, "history")
+DEFAULT_UDID_FILE = os.path.join(SCRIPT_DIR, "default_device_udid.txt")

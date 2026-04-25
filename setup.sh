@@ -1,4 +1,6 @@
 #!/bin/bash
+# Developer setup — links source ifly.py into PATH and configures sudoers.
+# For packaged-binary installs, use install-cli.sh instead.
 set -e
 
 WRAPPER=/usr/local/bin/ifly-tunneld
@@ -6,9 +8,13 @@ STOP_WRAPPER=/usr/local/bin/ifly-tunneld-stop
 SUDOERS_FILE=/etc/sudoers.d/ifly
 USER=$(whoami)
 
-# Find pymobiledevice3 — check system PATH first, then common locations, then app bundle
-CMD=$(which pymobiledevice3 2>/dev/null || true)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+IFLY_BIN="$SCRIPT_DIR/dist/ifly/ifly"
+IFLY_PY="$SCRIPT_DIR/ifly.py"
+IFLY_LINK=/usr/local/bin/ifly
 
+# Find pymobiledevice3
+CMD=$(which pymobiledevice3 2>/dev/null || true)
 if [ -z "$CMD" ]; then
     for candidate in \
         "$HOME/.local/bin/pymobiledevice3" \
@@ -33,14 +39,25 @@ echo "==> Using pymobiledevice3 at: $CMD"
 echo "==> Setting up for user: $USER"
 echo ""
 
-# 1. Start wrapper
-echo "[1/3] Creating start wrapper at $WRAPPER..."
+# 1. ifly symlink
+echo "[1/4] Creating ifly symlink at $IFLY_LINK..."
+if [ -x "$IFLY_BIN" ]; then
+    IFLY_SRC="$IFLY_BIN"
+    echo "     Using packaged binary: $IFLY_SRC"
+else
+    IFLY_SRC="$IFLY_PY"
+    chmod +x "$IFLY_SRC"
+    echo "     Using source script: $IFLY_SRC"
+fi
+sudo ln -sf "$IFLY_SRC" "$IFLY_LINK"
+echo "     Done."
+
+echo "[2/4] Creating start wrapper at $WRAPPER..."
 sudo cp "$CMD" "$WRAPPER"
 sudo chmod 755 "$WRAPPER"
 echo "     Done."
 
-# 2. Stop wrapper
-echo "[2/3] Creating stop wrapper at $STOP_WRAPPER..."
+echo "[3/4] Creating stop wrapper at $STOP_WRAPPER..."
 sudo tee "$STOP_WRAPPER" > /dev/null << 'EOF'
 #!/bin/sh
 pkill -9 -f "pymobiledevice3 remote tunneld" 2>/dev/null || true
@@ -50,8 +67,7 @@ EOF
 sudo chmod 755 "$STOP_WRAPPER"
 echo "     Done."
 
-# 3. sudoers
-echo "[3/3] Writing sudoers rule to $SUDOERS_FILE..."
+echo "[4/4] Writing sudoers rule to $SUDOERS_FILE..."
 RULE_1="$USER ALL=(ALL) NOPASSWD: $WRAPPER"
 RULE_2="$USER ALL=(ALL) NOPASSWD: $STOP_WRAPPER"
 
@@ -61,7 +77,6 @@ $RULE_2
 EOF
 sudo chmod 440 "$SUDOERS_FILE"
 
-# Validate with visudo
 if ! sudo visudo -cf "$SUDOERS_FILE" > /dev/null 2>&1; then
     echo "ERROR: sudoers syntax check failed. Removing $SUDOERS_FILE."
     sudo rm -f "$SUDOERS_FILE"
@@ -71,10 +86,9 @@ echo "     Done."
 
 echo ""
 echo "Setup complete. Run the following to verify:"
-echo "  python3 ifly.py doctor"
+echo "  ifly doctor"
 echo ""
 
-# Warn if using bundled binary
 case "$CMD" in
     *.app/*)
         echo "WARNING: Using pymobiledevice3 from app bundle ($CMD)."

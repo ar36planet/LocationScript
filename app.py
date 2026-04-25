@@ -8,6 +8,7 @@ import storage
 import tunnel
 import location
 import patrol as patrol_module
+from core.location_service import list_connected_devices
 from list_editor import ListEditorWindow
 from version import __version__
 
@@ -330,9 +331,16 @@ tunnel_frame.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(0, 10))
 tk.Button(tunnel_frame, text="🚀 啟動", command=tunnel.start_tunnel).pack(side=tk.LEFT, padx=5)
 tk.Button(tunnel_frame, text="⏹️ 停止", command=tunnel.stop_tunnel).pack(side=tk.LEFT)
 
+# 裝置狀態
+device_frame = tk.LabelFrame(frame, text="裝置", padx=10, pady=6)
+device_frame.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(0, 10))
+device_label = tk.Label(device_frame, text="偵測中...", fg="gray", anchor="w")
+device_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+tk.Button(device_frame, text="🔍 重新偵測", command=lambda: _update_device_label(reset_timer=True)).pack(side=tk.RIGHT)
+
 # 收藏地點
 fav_frame = tk.LabelFrame(frame, text="收藏地點", padx=10, pady=10)
-fav_frame.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(0, 10))
+fav_frame.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(0, 10))
 fav_var = tk.StringVar(value="")
 fav_menu = tk.OptionMenu(fav_frame, fav_var, "-- 選擇收藏地點 --")
 fav_menu.config(width=25)
@@ -344,7 +352,7 @@ update_favorites_menu()
 
 # 座標清單（右側欄）
 list_frame = tk.LabelFrame(frame, text="座標清單", padx=10, pady=10)
-list_frame.grid(row=0, column=5, rowspan=9, sticky="nsew", padx=(20, 0))
+list_frame.grid(row=0, column=5, rowspan=10, sticky="nsew", padx=(20, 0))
 
 list_top = tk.Frame(list_frame)
 list_top.pack(fill=tk.X, pady=(0, 5))
@@ -388,47 +396,71 @@ tk.Radiobutton(speed_row, text="來回", variable=patrol_mode_var, value="pingpo
 tk.Radiobutton(speed_row, text="單次", variable=patrol_mode_var, value="once", font=("", 9)).pack(side=tk.LEFT, padx=(2, 0))
 
 # Google Maps 網址
-tk.Label(frame, text="Google Maps 網址：").grid(row=3, column=0, sticky="w")
+tk.Label(frame, text="Google Maps 網址：").grid(row=4, column=0, sticky="w")
 url_entry = tk.Entry(frame, width=40)
-url_entry.grid(row=3, column=1, columnspan=2)
-tk.Button(frame, text="解析", command=do_parse_google_url).grid(row=3, column=3, padx=5)
+url_entry.grid(row=4, column=1, columnspan=2)
+tk.Button(frame, text="解析", command=do_parse_google_url).grid(row=4, column=3, padx=5)
 
 # 座標字串
-tk.Label(frame, text="座標字串：").grid(row=4, column=0, sticky="w")
+tk.Label(frame, text="座標字串：").grid(row=5, column=0, sticky="w")
 coords_entry = tk.Entry(frame, width=40)
-coords_entry.grid(row=4, column=1, columnspan=2)
-tk.Button(frame, text="解析", command=do_parse_coords).grid(row=4, column=3, padx=5)
+coords_entry.grid(row=5, column=1, columnspan=2)
+tk.Button(frame, text="解析", command=do_parse_coords).grid(row=5, column=3, padx=5)
 
 # 經緯度
-tk.Label(frame, text="緯度：").grid(row=5, column=0, sticky="w", pady=10)
+tk.Label(frame, text="緯度：").grid(row=6, column=0, sticky="w", pady=10)
 lat_entry = tk.Entry(frame, width=15)
-lat_entry.grid(row=5, column=1, sticky="w")
+lat_entry.grid(row=6, column=1, sticky="w")
 lat_entry.insert(0, "25.0330")
 
-tk.Label(frame, text="經度：").grid(row=5, column=2, sticky="e")
+tk.Label(frame, text="經度：").grid(row=6, column=2, sticky="e")
 lng_entry = tk.Entry(frame, width=15)
-lng_entry.grid(row=5, column=3, sticky="w")
+lng_entry.grid(row=6, column=3, sticky="w")
 lng_entry.insert(0, "121.5654")
 
 # 按鈕
 btn_frame = tk.Frame(frame)
-btn_frame.grid(row=6, column=0, columnspan=4, pady=15)
+btn_frame.grid(row=7, column=0, columnspan=4, pady=15)
 tk.Button(btn_frame, text="📍 設定位置", command=set_location, width=12).pack(side=tk.LEFT, padx=5)
 tk.Button(btn_frame, text="🔄 清除", command=location.clear_location, width=12).pack(side=tk.LEFT, padx=5)
 
 # 狀態
 status = tk.Label(frame, text="就緒 — iOS 16 以下可跳過 Tunnel")
-status.grid(row=7, column=0, columnspan=4)
+status.grid(row=8, column=0, columnspan=4)
 
 # 地點名稱
 location_name_label = tk.Label(frame, text="", fg="gray", wraplength=380, justify="center")
-location_name_label.grid(row=8, column=0, columnspan=4, pady=(0, 5))
+location_name_label.grid(row=9, column=0, columnspan=4, pady=(0, 5))
+
+_device_label_timer_id = None
+
+def _update_device_label(reset_timer: bool = False):
+    global _device_label_timer_id
+    if reset_timer and _device_label_timer_id is not None:
+        root.after_cancel(_device_label_timer_id)
+        _device_label_timer_id = None
+
+    devices = list_connected_devices()
+    if not devices:
+        device_label.config(text="📵 未偵測到裝置", fg="gray")
+    elif len(devices) == 1:
+        d = devices[0]
+        conn = f"  [{d['connection']}]" if d.get("connection") else ""
+        udid_short = d["udid"][:8] + "…"
+        device_label.config(text=f"📱 {d['name']}  iOS {d['ios']}{conn}  {udid_short}", fg="green")
+    else:
+        parts = [f"📱 {d['name']} (iOS {d['ios']})" for d in devices]
+        device_label.config(text="  |  ".join(parts), fg="blue")
+    _device_label_timer_id = root.after(3000, _update_device_label)
+
 
 # 初始化各模組（widget 建立後才能傳入）
 tunnel.setup(root, status, tunnel_status)
 location.setup(root, status, lat_entry, lng_entry, location_name_label)
 
-# 啟動 Tunnel 狀態檢查
+# 啟動輪詢
 tunnel.check_tunnel_status()
+tunnel._check_device_change()
+_update_device_label()
 
 root.mainloop()

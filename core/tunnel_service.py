@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+import time
 
 from config import PYMOBILEDEVICE3
 from core.result import Result
@@ -31,6 +32,28 @@ def find_pymobiledevice3() -> str | None:
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return candidate
     return None
+
+
+def _has_device() -> bool:
+    try:
+        proc = subprocess.run(
+            [PYMOBILEDEVICE3, "usbmux", "list"],
+            capture_output=True, text=True, timeout=8,
+        )
+        import json
+        devices = json.loads(proc.stdout or "[]")
+        return bool(devices)
+    except Exception:
+        return False
+
+
+def wait_for_ready(timeout: int = 15) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if is_running() and _has_device():
+            return True
+        time.sleep(1)
+    return False
 
 
 def start_tunnel(headless: bool = True) -> Result:
