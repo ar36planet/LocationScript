@@ -344,6 +344,110 @@ def _handle_install(_args) -> Result:
         "pymobiledevice3": cmd_path,
     })
 
+def _handle_update(args) -> Result:
+    USER = os.environ.get("USER") or os.environ.get("LOGNAME") or ""
+    WRAPPER = "/usr/local/bin/ifly-tunneld"
+    STOP_WRAPPER = "/usr/local/bin/ifly-tunneld-stop"
+    SUDOERS_FILE = "/etc/sudoers.d/ifly"
+
+    def _step(label: str):
+        print(f"\n{label}", flush=True)
+
+    def _run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
+        return subprocess.run(cmd, check=True, **kwargs)
+
+    cmd_path = find_pymobiledevice3()
+    if not cmd_path:
+        return Result(False, "ENV_ERROR", "pymobiledevice3 not found. Install/upgrade it first (pipx/brew).")
+
+    checks: dict = {"pymobiledevice3": cmd_path}
+    try:
+        ver = subprocess.run([cmd_path, "version"], capture_output=True, text=True, timeout=10)
+        checks["pymobiledevice3_version"] = (ver.stdout or ver.stderr or "").strip()
+    except Exception as e:
+        checks["pymobiledevice3_version"] = str(e)
+
+    if os.path.isfile(WRAPPER) and os.access(WRAPPER, os.X_OK):
+        try:
+            wv = subprocess.run([WRAPPER, "version"], capture_output=True, text=True, timeout=10)
+            checks["wrapper_version_before"] = (wv.stdout or wv.stderr or "").strip()
+        except Exception as e:
+            checks["wrapper_version_before"] = str(e)
+    else:
+        checks["wrapper_version_before"] = None
+
+    # ── refresh tunneld wrapper ─────────────────────────────────────────────
+    _step("[1/3] Refreshing tunneld wrapper...")
+    try:
+        _run(["sudo", "cp", cmd_path, WRAPPER])
+        _run(["sudo", "chmod", "755", WRAPPER])
+    except subprocess.CalledProcessError as e:
+        return Result(False, "EXEC_ERROR", f"Failed to refresh {WRAPPER}: {e}", data=checks)
+    print("      Done.", flush=True)
+
+    # ── refresh stop wrapper ────────────────────────────────────────────────
+    _step("[2/3] Refreshing tunneld stop wrapper...")
+    stop_script = (
+        "#!/bin/sh\n"
+        "pkill -9 -f 'pymobiledevice3 remote tunneld' 2>/dev/null || true\n"
+        "pkill -9 -f 'ifly-tunneld remote tunneld' 2>/dev/null || true\n"
+        "exit 0\n"
+    )
+    try:
+        proc = subprocess.Popen(
+            ["sudo", "tee", STOP_WRAPPER],
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        )
+        _, err = proc.communicate(input=stop_script.encode())
+        if proc.returncode != 0:
+            return Result(False, "EXEC_ERROR", f"Failed to write {STOP_WRAPPER}: {err.decode().strip()[:160]}",
+                          data=checks)
+        _run(["sudo", "chmod", "755", STOP_WRAPPER])
+    except Exception as e:
+        return Result(False, "EXEC_ERROR", f"Failed to refresh {STOP_WRAPPER}: {e}", data=checks)
+    print("      Done.", flush=True)
+
+    # ── sudoers ─────────────────────────────────────────────────────────────
+    _step("[3/3] Refreshing sudoers (passwordless tunnel)...")
+    if args.skip_sudoers:
+        print("      Skipped (--skip-sudoers).", flush=True)
+    else:
+        if not USER:
+            return Result(False, "ENV_ERROR", "Cannot determine current user ($USER unset)", data=checks)
+        sudoers_content = (
+            f"{USER} ALL=(ALL) NOPASSWD: {WRAPPER}\n"
+            f"{USER} ALL=(ALL) NOPASSWD: {STOP_WRAPPER}\n"
+        )
+        try:
+            proc = subprocess.Popen(
+                ["sudo", "tee", SUDOERS_FILE],
+                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            )
+            _, err = proc.communicate(input=sudoers_content.encode())
+            if proc.returncode != 0:
+                return Result(False, "EXEC_ERROR", f"Failed to write sudoers: {err.decode().strip()[:160]}",
+                              data=checks)
+            _run(["sudo", "chmod", "440", SUDOERS_FILE])
+            check = subprocess.run(
+                ["sudo", "visudo", "-cf", SUDOERS_FILE],
+                capture_output=True, text=True,
+            )
+            if check.returncode != 0:
+                subprocess.run(["sudo", "rm", "-f", SUDOERS_FILE])
+                return Result(False, "EXEC_ERROR", f"sudoers syntax error: {check.stderr.strip()[:160]}",
+                              data=checks)
+        except Exception as e:
+            return Result(False, "EXEC_ERROR", f"sudoers setup failed: {e}", data=checks)
+        print("      Done.", flush=True)
+
+    try:
+        wv = subprocess.run([WRAPPER, "version"], capture_output=True, text=True, timeout=10)
+        checks["wrapper_version_after"] = (wv.stdout or wv.stderr or "").strip()
+    except Exception as e:
+        checks["wrapper_version_after"] = str(e)
+
+    return Result(True, "UPDATE_OK", "Update complete — run 'ifly doctor' to verify", data=checks)
+
 
 def _handle_mcp(_args):
     from core.mcp_server import run as mcp_run
@@ -585,6 +689,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     install = top.add_parser("install", help="One-time setup: install ifly, configure tunneld and sudoers")
     install.set_defaults(handler=_handle_install)
+
+    update = top.add_parser("update", help="Refresh tunneld wrapper + sudoers after pymobiledevice3 upgrade")
+    update.add_argument("--skip-sudoers", action="store_true",
+                        help="Update wrappers only; do not touch /etc/sudoers.d/ifly")
+    update.set_defaults(handler=_handle_update)
 
     mcp = top.add_parser("mcp", help="Start MCP stdio server (for AI agent integration)")
     mcp.set_defaults(handler=_handle_mcp)

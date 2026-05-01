@@ -11,6 +11,7 @@ import patrol as patrol_module
 from core.location_service import list_connected_devices
 from list_editor import ListEditorWindow
 from version import __version__
+import threading
 
 # ── 收藏地點 ─────────────────────────────────────────────────────────────────
 
@@ -433,25 +434,47 @@ location_name_label = tk.Label(frame, text="", fg="gray", wraplength=380, justif
 location_name_label.grid(row=9, column=0, columnspan=4, pady=(0, 5))
 
 _device_label_timer_id = None
+_device_label_running = False
 
 def _update_device_label(reset_timer: bool = False):
-    global _device_label_timer_id
+    global _device_label_timer_id, _device_label_running
     if reset_timer and _device_label_timer_id is not None:
         root.after_cancel(_device_label_timer_id)
         _device_label_timer_id = None
 
-    devices = list_connected_devices()
-    if not devices:
-        device_label.config(text="📵 未偵測到裝置", fg="gray")
-    elif len(devices) == 1:
-        d = devices[0]
-        conn = f"  [{d['connection']}]" if d.get("connection") else ""
-        udid_short = d["udid"][:8] + "…"
-        device_label.config(text=f"📱 {d['name']}  iOS {d['ios']}{conn}  {udid_short}", fg="green")
-    else:
-        parts = [f"📱 {d['name']} (iOS {d['ios']})" for d in devices]
-        device_label.config(text="  |  ".join(parts), fg="blue")
-    _device_label_timer_id = root.after(3000, _update_device_label)
+    if _device_label_running:
+        _device_label_timer_id = root.after(3000, _update_device_label)
+        return
+
+    _device_label_running = True
+    device_label.config(text="偵測中...", fg="gray")
+
+    def run():
+        try:
+            devices = list_connected_devices()
+        except Exception:
+            devices = []
+
+        def update_ui():
+            global _device_label_running
+            try:
+                if not devices:
+                    device_label.config(text="📵 未偵測到裝置", fg="gray")
+                elif len(devices) == 1:
+                    d = devices[0]
+                    conn = f"  [{d['connection']}]" if d.get("connection") else ""
+                    udid_short = d["udid"][:8] + "…"
+                    device_label.config(text=f"📱 {d['name']}  iOS {d['ios']}{conn}  {udid_short}", fg="green")
+                else:
+                    parts = [f"📱 {d['name']} (iOS {d['ios']})" for d in devices]
+                    device_label.config(text="  |  ".join(parts), fg="blue")
+            finally:
+                _device_label_running = False
+                _device_label_timer_id = root.after(3000, _update_device_label)
+
+        root.after(0, update_ui)
+
+    threading.Thread(target=run, daemon=True).start()
 
 
 # 初始化各模組（widget 建立後才能傳入）

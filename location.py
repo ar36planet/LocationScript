@@ -106,8 +106,16 @@ def set_location_direct(lat: str, lng: str, save_history: bool = True, _fetch_na
 
 
 def clear_location():
-    result = location_service.clear_location()
-    if result.ok:
-        _status.config(text="✅ 已清除")
-    else:
-        _status.config(text=f"❌ {result.message[:50]}")
+    def run():
+        result = location_service.clear_location()
+
+        def update_ui():
+            if result.ok:
+                _status.config(text="✅ 已清除")
+                _location_name_label.config(text="", fg="gray")
+            else:
+                _status.config(text=f"❌ {result.message[:50]}")
+
+        _root.after(0, update_ui)
+
+    threading.Thread(target=run, daemon=True).start()
