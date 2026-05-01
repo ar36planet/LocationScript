@@ -88,16 +88,23 @@ def _handle_device_list(_args) -> Result:
 
     output = (proc.stdout or "").strip()
     default_udid = _load_default_udid()
+    def _first(d: dict, *keys: str, default: str = "") -> str:
+        for key in keys:
+            value = d.get(key)
+            if value is not None and value != "":
+                return str(value)
+        return default
+
     try:
         raw_list = json.loads(output)
         devices = [
             {
-                "udid": d.get("Identifier", ""),
-                "name": d.get("DeviceName", ""),
-                "model": d.get("ProductType", ""),
-                "ios": d.get("ProductVersion", ""),
-                "connection": d.get("ConnectionType", ""),
-                "default": d.get("Identifier", "") == default_udid,
+                "udid": _first(d, "Identifier", "identifier", "UDID", "udid"),
+                "name": _first(d, "DeviceName", "device_name", "Name", "name"),
+                "model": _first(d, "ProductType", "product_type", "Model", "model"),
+                "ios": _first(d, "ProductVersion", "product_version", "OSVersion", "ios"),
+                "connection": _first(d, "ConnectionType", "connection_type", "Connection", "connection"),
+                "default": _first(d, "Identifier", "identifier", "UDID", "udid") == default_udid,
             }
             for d in raw_list if isinstance(d, dict)
         ]
@@ -542,6 +549,27 @@ def _handle_doctor(_args) -> Result:
 
     wrapper = "/usr/local/bin/ifly-tunneld"
     checks["wrapper_exists"] = os.path.isfile(wrapper) and os.access(wrapper, os.X_OK)
+    checks["wrapper_version_ok"] = False
+    checks["wrapper_version_output"] = ""
+    checks["wrapper_version_match"] = False
+    checks["wrapper_version_match_major"] = False
+    if checks["wrapper_exists"]:
+        try:
+            wver = subprocess.run([wrapper, "version"], capture_output=True, text=True, timeout=10)
+            checks["wrapper_version_ok"] = wver.returncode == 0
+            checks["wrapper_version_output"] = (wver.stdout or wver.stderr or "").strip()
+        except Exception as e:
+            checks["wrapper_version_ok"] = False
+            checks["wrapper_version_output"] = str(e)
+
+        cmd_ver = checks.get("version_output", "")
+        wrapper_ver = checks.get("wrapper_version_output", "")
+        checks["wrapper_version_match"] = bool(cmd_ver and wrapper_ver and cmd_ver == wrapper_ver)
+        cmd_major = re.search(r"version\s+(\d+)", cmd_ver, re.IGNORECASE)
+        wrapper_major = re.search(r"version\s+(\d+)", wrapper_ver, re.IGNORECASE)
+        if cmd_major and wrapper_major:
+            checks["wrapper_version_match_major"] = cmd_major.group(1) == wrapper_major.group(1)
+
     try:
         sudo_check = subprocess.run(
             ["sudo", "-n", wrapper, "remote", "tunneld", "--help"],
@@ -571,10 +599,14 @@ def _handle_doctor(_args) -> Result:
     checks["default_udid"] = saved_udid or None
     checks["default_udid_online"] = saved_udid in connected if saved_udid else False
 
+    version_compatible = checks.get("wrapper_version_match_major") if checks.get("wrapper_exists") else True
     all_ok = (checks.get("version_ok") and checks.get("sudo_nopasswd_ok")
+              and version_compatible
               and checks["device_connected"] and (not saved_udid or checks["default_udid_online"]))
     if all_ok:
         return Result(True, "OK", "All checks passed", data=checks)
+    if checks.get("wrapper_exists") and not version_compatible:
+        return Result(False, "ENV_ERROR", "Wrapper version mismatch: run 'ifly update'", data=checks)
     return Result(False, "ENV_ERROR", "Some checks failed", data=checks)
 
 

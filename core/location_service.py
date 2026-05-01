@@ -11,16 +11,36 @@ import urllib.request
 from config import PYMOBILEDEVICE3, DEFAULT_UDID_FILE
 from core.result import Result
 
+_LAST_DEVICE_SCAN_ERROR = ""
+
+
+def _field(d: dict, *keys: str, default: str = "") -> str:
+    for key in keys:
+        value = d.get(key)
+        if value is not None and value != "":
+            return str(value)
+    return default
+
 
 def _fetch_raw_devices() -> list[dict]:
+    global _LAST_DEVICE_SCAN_ERROR
     try:
         proc = subprocess.run(
             [PYMOBILEDEVICE3, "usbmux", "list"],
             capture_output=True, text=True, timeout=8,
         )
+        if proc.returncode != 0:
+            _LAST_DEVICE_SCAN_ERROR = (proc.stderr or proc.stdout or "").strip()[:240]
+            return []
+        _LAST_DEVICE_SCAN_ERROR = ""
         return json.loads(proc.stdout or "[]")
-    except Exception:
+    except Exception as e:
+        _LAST_DEVICE_SCAN_ERROR = str(e)
         return []
+
+
+def get_last_device_scan_error() -> str:
+    return _LAST_DEVICE_SCAN_ERROR
 
 
 def _connected_udids() -> list[str]:
@@ -29,11 +49,11 @@ def _connected_udids() -> list[str]:
     for d in _fetch_raw_devices():
         if not isinstance(d, dict):
             continue
-        udid = d.get("Identifier")
+        udid = _field(d, "Identifier", "identifier", "UDID", "udid")
         if not udid:
             continue
         # Prefer USB over WiFi when the same UDID appears on both
-        conn = d.get("ConnectionType", "")
+        conn = _field(d, "ConnectionType", "connection_type", "Connection", "connection")
         if udid not in seen or conn == "USB":
             seen[udid] = udid
     return list(seen.values())
@@ -45,15 +65,15 @@ def list_connected_devices() -> list[dict]:
     for d in _fetch_raw_devices():
         if not isinstance(d, dict):
             continue
-        udid = d.get("Identifier")
+        udid = _field(d, "Identifier", "identifier", "UDID", "udid")
         if not udid:
             continue
-        conn = d.get("ConnectionType", "")
+        conn = _field(d, "ConnectionType", "connection_type", "Connection", "connection")
         if udid not in seen or conn == "USB":
             seen[udid] = {
                 "udid": udid,
-                "name": d.get("DeviceName", ""),
-                "ios": d.get("ProductVersion", ""),
+                "name": _field(d, "DeviceName", "device_name", "Name", "name"),
+                "ios": _field(d, "ProductVersion", "product_version", "OSVersion", "ios"),
                 "connection": conn,
             }
     return list(seen.values())

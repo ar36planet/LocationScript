@@ -72,6 +72,9 @@ jobs:
 
             ## iOS 虛擬定位（GUI）
             下載 `iOS虛擬定位-*-macos.zip`，解壓後拖入 `/Applications/`。
+
+            ## Release Note
+            修復了GUI延遲問題，升級使用的pymobiledevice3版本。
           files: |
             dist/ifly-${{ steps.version.outputs.version }}-macos.zip
             dist/iOS虛擬定位-${{ steps.version.outputs.version }}-macos.zip

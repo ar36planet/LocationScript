@@ -13,6 +13,22 @@
 
 ---
 
+## 套件升級（pymobiledevice3）
+
+`pymobiledevice3` 升級後，**tunnel wrapper**（`/usr/local/bin/ifly-tunneld`）不會自動更新，會導致「定位指令用新版本、tunneld 仍是舊版本」。
+
+建議流程：
+
+```bash
+pipx upgrade pymobiledevice3
+ifly update
+ifly --json doctor
+```
+
+更完整的注意事項與 rollback 請看：`spec/pymobiledevice3_upgrade_plan.md`
+
+---
+
 ## 前置需求
 
 - macOS

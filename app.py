@@ -8,7 +8,7 @@ import storage
 import tunnel
 import location
 import patrol as patrol_module
-from core.location_service import list_connected_devices
+from core.location_service import get_last_device_scan_error, list_connected_devices
 from list_editor import ListEditorWindow
 from version import __version__
 import threading
@@ -299,6 +299,16 @@ def stop_main_patrol():
     patrol_status_label.config(text="")
 
 
+def restore_all():
+    # 1) Stop patrol/movement tasks first
+    stop_main_patrol()
+    # 2) Stop location keepalive worker
+    location.stop_keepalive()
+    # 3) Clear simulated location (async UI update handled in location.clear_location)
+    location.clear_location()
+    status.config(text="還原中：停止巡邏與清除虛擬定位...")
+
+
 def on_closing():
     tunnel.cancel_check()
     location.stop_keepalive()
@@ -424,6 +434,7 @@ btn_frame = tk.Frame(frame)
 btn_frame.grid(row=7, column=0, columnspan=4, pady=15)
 tk.Button(btn_frame, text="📍 設定位置", command=set_location, width=12).pack(side=tk.LEFT, padx=5)
 tk.Button(btn_frame, text="🔄 清除", command=location.clear_location, width=12).pack(side=tk.LEFT, padx=5)
+tk.Button(btn_frame, text="♻️ 還原", command=restore_all, width=12).pack(side=tk.LEFT, padx=5)
 
 # 狀態
 status = tk.Label(frame, text="就緒 — iOS 16 以下可跳過 Tunnel")
@@ -447,7 +458,6 @@ def _update_device_label(reset_timer: bool = False):
         return
 
     _device_label_running = True
-    device_label.config(text="偵測中...", fg="gray")
 
     def run():
         try:
@@ -458,8 +468,13 @@ def _update_device_label(reset_timer: bool = False):
         def update_ui():
             global _device_label_running
             try:
+                scan_error = get_last_device_scan_error()
                 if not devices:
-                    device_label.config(text="📵 未偵測到裝置", fg="gray")
+                    if scan_error:
+                        hint = "（請確認 iPhone 已信任、或終端可執行 `pymobiledevice3 usbmux list`）"
+                        device_label.config(text=f"⚠️ 裝置偵測失敗：{scan_error} {hint}", fg="orange")
+                    else:
+                        device_label.config(text="📵 未偵測到裝置", fg="gray")
                 elif len(devices) == 1:
                     d = devices[0]
                     conn = f"  [{d['connection']}]" if d.get("connection") else ""
