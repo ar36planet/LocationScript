@@ -59,6 +59,17 @@ jobs:
           zip -r "iOS虛擬定位-${{ steps.version.outputs.version }}-macos.zip" iOS虛擬定位.app/
 
       # ── Release ────────────────────────────────────────────────────────────
+      - name: Extract changelog for this version
+        id: changelog
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          NOTES=$(awk "/^## v${VERSION}$/{found=1; next} found && /^## /{exit} found{print}" CHANGELOG.md)
+          {
+            echo "notes<<EOF"
+            echo "$NOTES"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -73,8 +84,7 @@ jobs:
             ## iOS 虛擬定位（GUI）
             下載 `iOS虛擬定位-*-macos.zip`，解壓後拖入 `/Applications/`。
 
-            ## Release Note
-            修復了GUI延遲問題，升級使用的pymobiledevice3版本。
+            ${{ steps.changelog.outputs.notes }}
           files: |
             dist/ifly-${{ steps.version.outputs.version }}-macos.zip
             dist/iOS虛擬定位-${{ steps.version.outputs.version }}-macos.zip

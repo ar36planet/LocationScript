@@ -2,16 +2,21 @@ import tkinter as tk
 from tkinter import messagebox, simpledialog, filedialog
 import json
 import os
+import urllib.request
+import urllib.error
+import webbrowser
 
 import config
 import storage
 import tunnel
 import location
 import patrol as patrol_module
-from core.location_service import get_last_device_scan_error, list_connected_devices
+from core.location_service import get_last_device_scan_error, list_connected_devices, set_session_udid, clear_session_udid
 from list_editor import ListEditorWindow
 from version import __version__
 import threading
+
+GITHUB_REPO = "ar36planet/LocationScript"
 
 # ── 收藏地點 ─────────────────────────────────────────────────────────────────
 
@@ -309,6 +314,47 @@ def restore_all():
     status.config(text="還原中：停止巡邏與清除虛擬定位...")
 
 
+def check_for_update(btn: tk.Button):
+    btn.config(state=tk.DISABLED, text="檢查中...")
+
+    def run():
+        try:
+            url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+            req = urllib.request.Request(url, headers={"User-Agent": "LocationScript-updater"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = json.loads(resp.read().decode())
+            tag = data.get("tag_name", "").lstrip("v")
+            release_url = data.get("html_url", f"https://github.com/{GITHUB_REPO}/releases/latest")
+
+            def update_ui():
+                btn.config(state=tk.NORMAL, text="🔄 檢查更新")
+                try:
+                    current = tuple(int(x) for x in __version__.split("."))
+                    latest = tuple(int(x) for x in tag.split("."))
+                except ValueError:
+                    messagebox.showinfo("更新", f"最新版本：{tag}\n當前版本：{__version__}\n\n無法比較版本號，請手動確認。")
+                    return
+                if latest > current:
+                    if messagebox.askyesno("發現新版本", f"最新版本：v{tag}\n當前版本：v{__version__}\n\n是否前往下載頁面？"):
+                        webbrowser.open(release_url)
+                else:
+                    messagebox.showinfo("已是最新版本", f"當前版本 v{__version__} 已是最新版本。")
+
+            root.after(0, update_ui)
+        except urllib.error.URLError:
+            root.after(0, lambda: (
+                btn.config(state=tk.NORMAL, text="🔄 檢查更新"),
+                messagebox.showerror("網路錯誤", "無法連線至 GitHub，請確認網路連線。"),
+            ))
+        except Exception as e:
+            root.after(0, lambda: (
+                btn.config(state=tk.NORMAL, text="🔄 檢查更新"),
+                messagebox.showerror("錯誤", str(e)[:120]),
+            ))
+
+    threading.Thread(target=run, daemon=True).start()
+
+
 def on_closing():
     tunnel.cancel_check()
     location.stop_keepalive()
@@ -324,7 +370,7 @@ def on_closing():
 
 root = tk.Tk()
 root.title(f"iOS 虛擬定位 v{__version__}")
-root.geometry("1080x540")
+root.geometry("1280x540")
 root.protocol("WM_DELETE_WINDOW", on_closing)
 
 frame = tk.Frame(root, padx=20, pady=15)
@@ -335,6 +381,10 @@ status_frame = tk.Frame(frame)
 status_frame.grid(row=0, column=0, columnspan=4, sticky="ew", pady=(0, 10))
 tunnel_status = tk.Label(status_frame, text="🔴 Tunnel 未啟動", fg="red", font=("", 12, "bold"))
 tunnel_status.pack(side=tk.LEFT)
+_update_btn = tk.Button(status_frame, text="🔄 檢查更新", font=("", 9))
+_update_btn.config(command=lambda: check_for_update(_update_btn))
+_update_btn.pack(side=tk.RIGHT)
+tk.Label(status_frame, text=f"v{__version__}", fg="gray", font=("", 9)).pack(side=tk.RIGHT, padx=(0, 6))
 
 # Tunnel 控制
 tunnel_frame = tk.LabelFrame(frame, text="Tunnel 控制（iOS 17+ 需要）", padx=10, pady=10)
@@ -348,6 +398,31 @@ device_frame.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(0, 10))
 device_label = tk.Label(device_frame, text="偵測中...", fg="gray", anchor="w")
 device_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
 tk.Button(device_frame, text="🔍 重新偵測", command=lambda: _update_device_label(reset_timer=True)).pack(side=tk.RIGHT)
+
+# 多裝置選擇列（有多台時才顯示）
+_device_selector_frame = tk.Frame(device_frame)
+_session_device_var = tk.StringVar(value="")
+_device_menu = tk.OptionMenu(_device_selector_frame, _session_device_var, "")
+_device_menu.config(width=28)
+_device_menu.pack(side=tk.LEFT)
+tk.Label(_device_selector_frame, text="（本次）", fg="gray", font=("", 9)).pack(side=tk.LEFT, padx=(2, 6))
+tk.Button(_device_selector_frame, text="✕ 重設預設", font=("", 9),
+          command=lambda: (clear_session_udid(), _session_device_var.set(""), status.config(text="✅ 已重設為預設裝置"))).pack(side=tk.LEFT)
+_session_devices: list[dict] = []
+
+def _on_session_device_select(*_):
+    label = _session_device_var.get()
+    for d in _session_devices:
+        if _device_display(d) == label:
+            set_session_udid(d["udid"])
+            status.config(text=f"✅ 本次使用：{d['name']}")
+            break
+
+_session_device_var.trace_add("write", _on_session_device_select)
+
+def _device_display(d: dict) -> str:
+    conn = f" [{d['connection']}]" if d.get("connection") else ""
+    return f"{d['name']} (iOS {d['ios']}){conn}"
 
 # 收藏地點
 fav_frame = tk.LabelFrame(frame, text="收藏地點", padx=10, pady=10)
@@ -466,23 +541,35 @@ def _update_device_label(reset_timer: bool = False):
             devices = []
 
         def update_ui():
-            global _device_label_running
+            global _device_label_running, _session_devices
             try:
                 scan_error = get_last_device_scan_error()
                 if not devices:
+                    _device_selector_frame.pack_forget()
                     if scan_error:
                         hint = "（請確認 iPhone 已信任、或終端可執行 `pymobiledevice3 usbmux list`）"
                         device_label.config(text=f"⚠️ 裝置偵測失敗：{scan_error} {hint}", fg="orange")
                     else:
                         device_label.config(text="📵 未偵測到裝置", fg="gray")
                 elif len(devices) == 1:
+                    _device_selector_frame.pack_forget()
                     d = devices[0]
                     conn = f"  [{d['connection']}]" if d.get("connection") else ""
                     udid_short = d["udid"][:8] + "…"
                     device_label.config(text=f"📱 {d['name']}  iOS {d['ios']}{conn}  {udid_short}", fg="green")
                 else:
-                    parts = [f"📱 {d['name']} (iOS {d['ios']})" for d in devices]
-                    device_label.config(text="  |  ".join(parts), fg="blue")
+                    _session_devices = devices
+                    labels = [_device_display(d) for d in devices]
+                    # rebuild OptionMenu choices
+                    menu = _device_menu["menu"]
+                    menu.delete(0, "end")
+                    for lbl in labels:
+                        menu.add_command(label=lbl, command=lambda v=lbl: _session_device_var.set(v))
+                    # set current selection if not yet chosen
+                    if _session_device_var.get() not in labels:
+                        _session_device_var.set(labels[0])
+                    device_label.config(text=f"⚠️ 偵測到 {len(devices)} 台裝置，請選擇：", fg="orange")
+                    _device_selector_frame.pack(side=tk.LEFT, fill=tk.X, pady=(4, 0))
             finally:
                 _device_label_running = False
                 _device_label_timer_id = root.after(3000, _update_device_label)

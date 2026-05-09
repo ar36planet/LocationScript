@@ -12,6 +12,17 @@ from config import PYMOBILEDEVICE3, DEFAULT_UDID_FILE
 from core.result import Result
 
 _LAST_DEVICE_SCAN_ERROR = ""
+_session_udid: str | None = None
+
+
+def set_session_udid(udid: str) -> None:
+    global _session_udid
+    _session_udid = udid
+
+
+def clear_session_udid() -> None:
+    global _session_udid
+    _session_udid = None
 
 
 def _field(d: dict, *keys: str, default: str = "") -> str:
@@ -89,6 +100,10 @@ def _udid_args() -> Result | list[str]:
     # Single device: always use it directly, ignore saved default
     if len(connected) == 1:
         return ["--tunnel", connected[0]]
+
+    # Session override (temporary, not written to disk)
+    if _session_udid and _session_udid in connected:
+        return ["--tunnel", _session_udid]
 
     # Multiple devices: require a saved default
     try:

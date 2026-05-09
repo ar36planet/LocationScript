@@ -3,6 +3,7 @@ from tkinter import messagebox, filedialog
 import re
 import json
 import route_planner
+import gpx_to_route
 
 
 class ListEditorWindow:
@@ -60,6 +61,7 @@ class ListEditorWindow:
         self.dwell_entry.insert(0, "60")
         self.dwell_entry.pack(side=tk.LEFT)
         tk.Button(ctrl_row, text="✅ 解析並載入", command=self._parse_and_load).pack(side=tk.LEFT, padx=10)
+        tk.Button(ctrl_row, text="📂 匯入 GPX", command=self._import_gpx).pack(side=tk.LEFT)
 
         result_lf = tk.LabelFrame(outer, text="解析結果", padx=8, pady=8)
         result_lf.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
@@ -137,6 +139,31 @@ class ListEditorWindow:
             default_dwell = 60
         text = self.text_input.get("1.0", tk.END)
         self._items = self._parse_lines(text, default_dwell)
+        self.result_lb.delete(0, tk.END)
+        for item in self._items:
+            self.result_lb.insert(tk.END, f"{item['name']}  ({item['dwell']}s)")
+        self.count_label.config(text=f"共 {len(self._items)} 筆")
+
+    def _import_gpx(self):
+        filepath = filedialog.askopenfilename(
+            title="選擇 GPX 檔案",
+            filetypes=[("GPX 檔案", "*.gpx"), ("所有檔案", "*.*")],
+        )
+        if not filepath:
+            return
+        try:
+            default_dwell = max(1, int(self.dwell_entry.get().strip()))
+        except ValueError:
+            default_dwell = 60
+        try:
+            points = gpx_to_route.parse_gpx(filepath)
+        except Exception as e:
+            messagebox.showerror("匯入失敗", str(e))
+            return
+        if not points:
+            messagebox.showwarning("無座標", "GPX 檔案中找不到任何座標點")
+            return
+        self._items = gpx_to_route.to_route_json(points, dwell=default_dwell)
         self.result_lb.delete(0, tk.END)
         for item in self._items:
             self.result_lb.insert(tk.END, f"{item['name']}  ({item['dwell']}s)")

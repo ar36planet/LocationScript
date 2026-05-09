@@ -15,8 +15,9 @@
 ## 系統需求
 
 - macOS（Apple Silicon 或 Intel）
-- iPhone 透過 USB 連接至 Mac
-- iOS 17+ 需開啟**開發者模式**（設定 > 隱私權與安全性 > 開發者模式）
+- iPhone / iPad 透過 USB 連接至 Mac（或已啟用 WiFi 同步）
+- iOS / iPadOS 17+ 需開啟**開發者模式**（設定 > 隱私權與安全性 > 開發者模式）
+- 多台裝置同時連接時，可在 GUI 裝置欄選擇本次控制的目標裝置
 
 ---
 
@@ -234,9 +235,20 @@ ifly --json location parse --google-url "<URL>"
 
 2. 設定「預設停留秒數」（巡邏時每個地點的停留時間，預設 60 秒）
 
-3. 點「✅ 解析並載入」確認解析結果
+3. 點「✅ 解析並載入」確認解析結果，或點「📂 匯入 GPX」直接從 GPX 檔案匯入路線
 
 4. 點「✅ 套用到主視窗」或「💾 儲存 JSON」存成檔案
+
+### GPX 匯入
+
+支援從 iAnyGo、Strava、Google Maps 等工具匯出的 `.gpx` 檔案，自動解析所有軌跡點（`<trkpt>`）、路線點（`<rtept>`）或 waypoint（`<wpt>`）。
+
+也可透過命令列工具直接轉換：
+
+```bash
+python3 gpx_to_route.py my_route.gpx -o route/我的路線.json
+python3 gpx_to_route.py my_route.gpx --dwell 60   # 自訂停留秒數
+```
 
 ---
 
@@ -295,6 +307,24 @@ ifly --json location parse --google-url "<URL>"
 | 循環 | A → B → C → A → B → C … 無限重複 |
 | 來回 | A → B → C → B → A … 無限來回，端點只停留一次 |
 | 單次 | A → B → C 走完即停止 |
+
+---
+
+## 多裝置切換
+
+同時連接多台裝置（如 iPhone + iPad）時，GUI 裝置欄會出現下拉選單：
+
+- 選擇目標裝置後，本次執行的所有定位指令都會發送到該裝置
+- 不會修改 `default_device_udid.txt`，關閉程式後自動恢復預設
+- 點「✕ 重設預設」可在同一次執行中切回預設裝置
+
+> WiFi 連線的裝置需在 Finder 勾選「透過 WiFi 顯示此裝置」才會出現在選單中。
+
+---
+
+## 版本更新
+
+視窗右上角顯示目前版本號，點「🔄 檢查更新」會連線至 GitHub Releases 查詢最新版本。若有新版本，可直接前往下載頁面。
 
 ---
 
