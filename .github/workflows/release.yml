@@ -78,7 +78,10 @@ jobs:
             ## ifly CLI
             下載 `ifly-*-macos.zip`，解壓後執行：
             ```bash
+            # 安裝
             ./ifly install
+            # 更新
+            ./ifly update
             ```
 
             ## iOS 虛擬定位（GUI）

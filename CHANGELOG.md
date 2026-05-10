@@ -9,16 +9,15 @@
 - **多裝置 Session 切換**：同時連接多台裝置（如 iPhone + iPad）時，裝置欄出現下拉選單。選擇後本次執行的定位指令發送至指定裝置，不寫入預設設定，關閉程式後自動還原。
 - **版本更新檢查**：視窗右上角新增「🔄 檢查更新」按鈕，連線至 GitHub Releases API 查詢最新版本，有更新時可直接開啟下載頁面。
 
-### 修正
 
-- 升級 pymobiledevice3 版本
-- 修復 GUI 延遲問題
 
 ## v3.2
 
 - 新增 MCP server 整合
 - 新增 `ifly agent-setup` 指令（Gemini / Claude / Codex）
 - 修正 move worker 異常
+- 升級 pymobiledevice3 版本
+- 修復 GUI 延遲問題
 
 ## v3.1
 
