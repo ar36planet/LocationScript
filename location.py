@@ -4,7 +4,7 @@ import tkinter as tk
 
 import config
 from core import location_service
-from core.location_service import list_connected_devices
+from core.location_service import list_connected_devices, fetch_name_time
 from storage import save_to_history
 
 _root = None
@@ -12,15 +12,17 @@ _status = None
 _lat_entry = None
 _lng_entry = None
 _location_name_label = None
+_location_time_label = None
 
 
-def setup(root, status, lat_entry, lng_entry, location_name_label):
-    global _root, _status, _lat_entry, _lng_entry, _location_name_label
+def setup(root, status, lat_entry, lng_entry, location_name_label, location_time_label):
+    global _root, _status, _lat_entry, _lng_entry, _location_name_label, _location_time_label
     _root = root
     _status = status
     _lat_entry = lat_entry
     _lng_entry = lng_entry
     _location_name_label = location_name_label
+    _location_time_label = location_time_label
 
 
 def parse_google_url(url: str):
@@ -73,13 +75,34 @@ def _show_device_picker(on_selected):
 
 
 def set_location_direct(lat: str, lng: str, save_history: bool = True, _fetch_name: bool = True):
+    try:
+        lat_f, lng_f = float(lat), float(lng)
+    except ValueError:
+        _root.after(0, lambda: _status.config(text="❌ 無效的座標格式"))
+        return
+    if not (-90 <= lat_f <= 90 and -180 <= lng_f <= 180):
+        _root.after(0, lambda: _status.config(text="❌ 座標超出範圍"))
+        return
+
+    if _fetch_name:
+        def fetch_info():
+            info = fetch_name_time(lat, lng)
+            def update_info():
+                _location_name_label.config(text=info.get("addr", ""), fg="gray")
+                lt = info.get("local_time", "")
+                tz = info.get("timezone", "")
+                _location_time_label.config(
+                    text=f"🕐 當地時間 {lt}（{tz}）" if lt else "", fg="gray"
+                )
+            _root.after(0, update_info)
+        threading.Thread(target=fetch_info, daemon=True).start()
+
     def run():
-        result = location_service.set_location(lat, lng, keepalive=True, fetch_name=_fetch_name)
+        result = location_service.set_location(lat, lng, keepalive=True, fetch_name=False)
 
         def update_ui():
             if not result.ok:
                 if result.code == "ENV_ERROR" and "Multiple devices" in result.message:
-                    # 多裝置：在主執行緒顯示選擇視窗，選完後重試
                     _show_device_picker(
                         on_selected=lambda: set_location_direct(lat, lng, save_history, _fetch_name)
                     )
@@ -97,8 +120,6 @@ def set_location_direct(lat: str, lng: str, save_history: bool = True, _fetch_na
             _lng_entry.delete(0, "end")
             _lng_entry.insert(0, lng)
             _status.config(text=f"✅ {result.message}")
-            addr = result.data.get("addr", "")
-            _location_name_label.config(text=addr, fg="gray")
 
         _root.after(0, update_ui)
 
@@ -113,6 +134,7 @@ def clear_location():
             if result.ok:
                 _status.config(text="✅ 已清除")
                 _location_name_label.config(text="", fg="gray")
+                _location_time_label.config(text="", fg="gray")
             else:
                 _status.config(text=f"❌ {result.message[:50]}")
 

@@ -160,6 +160,47 @@ def _kill_existing():
         pass
 
 
+def fetch_timezone_time(lat: str, lng: str) -> dict:
+    """Return timeapi.io payload for lat/lng, or {} on failure."""
+    try:
+        url = (
+            "https://timeapi.io/api/time/current/coordinate"
+            f"?latitude={urllib.parse.quote(lat)}&longitude={urllib.parse.quote(lng)}"
+        )
+        req = urllib.request.Request(url, headers={"User-Agent": "iOS-LocationScript/1.0"})
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            return json.loads(resp.read())
+    except Exception:
+        return {}
+
+
+def fetch_name_time(lat: str, lng: str) -> dict:
+    """Fetch address and local time for coordinates. Returns dict with addr/local_time/timezone."""
+    result = {}
+    try:
+        url = (
+            "https://nominatim.openstreetmap.org/reverse"
+            f"?lat={urllib.parse.quote(lat)}&lon={urllib.parse.quote(lng)}"
+            "&format=json&accept-language=zh-TW"
+        )
+        req = urllib.request.Request(url, headers={"User-Agent": "iOS-LocationScript/1.0"})
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            payload = json.loads(resp.read())
+        name = payload.get("display_name", "")
+        if name:
+            result["addr"] = name
+    except Exception:
+        pass
+    tz_payload = fetch_timezone_time(lat, lng)
+    if tz_payload:
+        local_time = tz_payload.get("time", "")
+        timezone = tz_payload.get("timeZone", "")
+        if local_time and timezone:
+            result["local_time"] = local_time
+            result["timezone"] = timezone
+    return result
+
+
 def parse_google_url(url: str) -> tuple | None:
     m = re.search(r"!3d([-\d.]+)!4d([-\d.]+)", url)
     if m:
@@ -284,20 +325,7 @@ def set_location(lat: str, lng: str, keepalive: bool = False, fetch_name: bool =
 
     data = {"pid": proc.pid}
     if fetch_name:
-        try:
-            url = (
-                "https://nominatim.openstreetmap.org/reverse"
-                f"?lat={urllib.parse.quote(lat)}&lon={urllib.parse.quote(lng)}"
-                "&format=json&accept-language=zh-TW"
-            )
-            req = urllib.request.Request(url, headers={"User-Agent": "iOS-LocationScript/1.0"})
-            with urllib.request.urlopen(req, timeout=6) as resp:
-                payload = json.loads(resp.read())
-            name = payload.get("display_name", "")
-            if name:
-                data["addr"] = name
-        except Exception:
-            pass
+        data.update(fetch_name_time(lat, lng))
 
     return Result(True, "LOCATION_SET", f"Location set: {lat}, {lng}", data=data)
 

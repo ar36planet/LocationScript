@@ -11,10 +11,12 @@ import storage
 import tunnel
 import location
 import patrol as patrol_module
-from core.location_service import get_last_device_scan_error, list_connected_devices, set_session_udid, clear_session_udid
+from world_clock import WorldClockWindow
+from core.location_service import get_last_device_scan_error, list_connected_devices, set_session_udid, clear_session_udid, fetch_timezone_time
 from list_editor import ListEditorWindow
 from version import __version__
 import threading
+from datetime import datetime
 
 GITHUB_REPO = "ar36planet/LocationScript"
 
@@ -166,6 +168,26 @@ def on_coord_list_select(event):
     set_location()
 
 
+_world_clock_win = None
+
+
+def open_world_clock():
+    global _world_clock_win
+    if _world_clock_win is not None:
+        try:
+            if _world_clock_win.win.winfo_exists():
+                _world_clock_win.win.lift()
+                _world_clock_win.win.focus_force()
+                return
+        except Exception:
+            pass
+    _world_clock_win = WorldClockWindow(
+        root,
+        location_fn=location.set_location_direct,
+        on_status=lambda text: status.config(text=text),
+    )
+
+
 def open_list_editor():
     global _list_editor_win
     if _list_editor_win is not None:
@@ -195,7 +217,45 @@ def set_location():
     if not lat or not lng:
         status.config(text="❌ 請輸入經緯度")
         return
-    location.set_location_direct(lat, lng)
+
+    if cross_day_var.get():
+        status.config(text="⏳ 查詢目標時區…")
+
+        def check_then_set():
+            tz = fetch_timezone_time(lat, lng)
+            year = tz.get("year")
+            month = tz.get("month")
+            day = tz.get("day")
+            timezone = tz.get("timeZone", "")
+
+            def proceed():
+                location.set_location_direct(lat, lng)
+
+            def on_result():
+                if year and month and day:
+                    local_date = datetime.now().date()
+                    target_date = datetime(year, month, day).date()
+                    if target_date != local_date:
+                        local_str = local_date.strftime("%Y-%m-%d")
+                        target_str = target_date.strftime("%Y-%m-%d")
+                        confirmed = messagebox.askokcancel(
+                            "跨日警示",
+                            f"目標地點目前日期為 {target_str}（{timezone}），\n"
+                            f"與本地日期 {local_str} 不同。\n\n"
+                            "確定要設定位置嗎？",
+                        )
+                        if confirmed:
+                            proceed()
+                        else:
+                            status.config(text="已取消")
+                        return
+                proceed()
+
+            root.after(0, on_result)
+
+        threading.Thread(target=check_then_set, daemon=True).start()
+    else:
+        location.set_location_direct(lat, lng)
 
 
 def do_parse_google_url():
@@ -370,7 +430,9 @@ def on_closing():
 
 root = tk.Tk()
 root.title(f"iOS 虛擬定位 v{__version__}")
-root.geometry("1280x540")
+root.geometry("1280x640")
+root.resizable(True, False)
+root.minsize(900, 540)
 root.protocol("WM_DELETE_WINDOW", on_closing)
 
 frame = tk.Frame(root, padx=20, pady=15)
@@ -381,10 +443,13 @@ status_frame = tk.Frame(frame)
 status_frame.grid(row=0, column=0, columnspan=4, sticky="ew", pady=(0, 10))
 tunnel_status = tk.Label(status_frame, text="🔴 Tunnel 未啟動", fg="red", font=("", 12, "bold"))
 tunnel_status.pack(side=tk.LEFT)
-_update_btn = tk.Button(status_frame, text="🔄 檢查更新", font=("", 9))
+tk.Button(status_frame, text="🌍 世界時區", font=("", 9), command=open_world_clock).pack(side=tk.RIGHT, padx=(0, 6))
+version_frame = tk.Frame(status_frame)
+version_frame.pack(side=tk.RIGHT, padx=(0, 6))
+tk.Label(version_frame, text=f"v{__version__}", fg="gray", font=("", 9)).pack(side=tk.LEFT, padx=(0, 4))
+_update_btn = tk.Button(version_frame, text="🔄 檢查更新", font=("", 9))
 _update_btn.config(command=lambda: check_for_update(_update_btn))
-_update_btn.pack(side=tk.RIGHT)
-tk.Label(status_frame, text=f"v{__version__}", fg="gray", font=("", 9)).pack(side=tk.RIGHT, padx=(0, 6))
+_update_btn.pack(side=tk.LEFT)
 
 # Tunnel 控制
 tunnel_frame = tk.LabelFrame(frame, text="Tunnel 控制（iOS 17+ 需要）", padx=10, pady=10)
@@ -504,20 +569,30 @@ lng_entry = tk.Entry(frame, width=15)
 lng_entry.grid(row=6, column=3, sticky="w")
 lng_entry.insert(0, "121.5654")
 
+# 跨日警示
+cross_day_var = tk.BooleanVar(value=False)
+tk.Checkbutton(frame, text="跨日警示", variable=cross_day_var).grid(
+    row=7, column=0, columnspan=4, sticky="w", padx=4,
+)
+
 # 按鈕
 btn_frame = tk.Frame(frame)
-btn_frame.grid(row=7, column=0, columnspan=4, pady=15)
+btn_frame.grid(row=8, column=0, columnspan=4, pady=15)
 tk.Button(btn_frame, text="📍 設定位置", command=set_location, width=12).pack(side=tk.LEFT, padx=5)
 tk.Button(btn_frame, text="🔄 清除", command=location.clear_location, width=12).pack(side=tk.LEFT, padx=5)
 tk.Button(btn_frame, text="♻️ 還原", command=restore_all, width=12).pack(side=tk.LEFT, padx=5)
 
 # 狀態
 status = tk.Label(frame, text="就緒 — iOS 16 以下可跳過 Tunnel")
-status.grid(row=8, column=0, columnspan=4)
+status.grid(row=9, column=0, columnspan=4)
 
 # 地點名稱
 location_name_label = tk.Label(frame, text="", fg="gray", wraplength=380, justify="center")
-location_name_label.grid(row=9, column=0, columnspan=4, pady=(0, 5))
+location_name_label.grid(row=10, column=0, columnspan=4, pady=(0, 2))
+
+# 當地時間
+location_time_label = tk.Label(frame, text="", fg="gray", justify="center")
+location_time_label.grid(row=11, column=0, columnspan=4, pady=(0, 5))
 
 _device_label_timer_id = None
 _device_label_running = False
@@ -581,7 +656,7 @@ def _update_device_label(reset_timer: bool = False):
 
 # 初始化各模組（widget 建立後才能傳入）
 tunnel.setup(root, status, tunnel_status)
-location.setup(root, status, lat_entry, lng_entry, location_name_label)
+location.setup(root, status, lat_entry, lng_entry, location_name_label, location_time_label)
 
 # 啟動輪詢
 tunnel.check_tunnel_status()
