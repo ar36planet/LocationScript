@@ -32,6 +32,14 @@ else
     brew install python-tk@3.14
 fi
 
+# 檢查 CustomTkinter
+if python3 -c "import customtkinter" &> /dev/null; then
+    echo "✅ CustomTkinter 已安裝"
+else
+    echo "📦 安裝 CustomTkinter..."
+    pip3 install customtkinter --break-system-packages
+fi
+
 # 檢查 pipx
 if command -v pipx &> /dev/null; then
     echo "✅ pipx 已安裝"

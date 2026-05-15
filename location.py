@@ -2,10 +2,13 @@ import os
 import threading
 import tkinter as tk
 
+import customtkinter as ctk
+
 import config
 from core import location_service
 from core.location_service import list_connected_devices, fetch_name_time
 from storage import save_to_history
+from ui.theme import SECONDARY, PAD_SM, PAD_MD, BUTTON_HEIGHT
 
 _root = None
 _status = None
@@ -41,23 +44,24 @@ def _show_device_picker(on_selected):
     """彈出裝置選擇視窗，選完後呼叫 on_selected(udid)。"""
     devices = list_connected_devices()
     if not devices:
-        _status.config(text="❌ 沒有裝置連接")
+        _status.configure(text="❌ 沒有裝置連接")
         return
 
-    dialog = tk.Toplevel(_root)
+    dialog = ctk.CTkToplevel(_root)
     dialog.title("選擇裝置")
     dialog.resizable(False, False)
     dialog.grab_set()
 
-    tk.Label(dialog, text="偵測到多台裝置，請選擇要使用的裝置：",
-             padx=20, pady=10).pack(anchor="w")
+    ctk.CTkLabel(dialog, text="偵測到多台裝置，請選擇要使用的裝置：").pack(
+        anchor="w", padx=PAD_MD, pady=(PAD_MD, PAD_SM)
+    )
 
     var = tk.StringVar(value=devices[0]["udid"])
     for d in devices:
         label = f"{d['name']}  iOS {d['ios']}\n{d['udid']}"
-        tk.Radiobutton(dialog, text=label, variable=var,
-                       value=d["udid"], justify="left",
-                       padx=20).pack(anchor="w", pady=2)
+        ctk.CTkRadioButton(dialog, text=label, variable=var, value=d["udid"]).pack(
+            anchor="w", padx=PAD_MD, pady=2
+        )
 
     def confirm():
         selected = var.get()
@@ -70,7 +74,9 @@ def _show_device_picker(on_selected):
         dialog.destroy()
         on_selected()
 
-    tk.Button(dialog, text="確定", command=confirm, width=10).pack(pady=10)
+    ctk.CTkButton(dialog, text="確定", command=confirm, width=80, height=BUTTON_HEIGHT).pack(
+        pady=PAD_MD
+    )
     dialog.wait_window()
 
 
@@ -78,21 +84,22 @@ def set_location_direct(lat: str, lng: str, save_history: bool = True, _fetch_na
     try:
         lat_f, lng_f = float(lat), float(lng)
     except ValueError:
-        _root.after(0, lambda: _status.config(text="❌ 無效的座標格式"))
+        _root.after(0, lambda: _status.configure(text="❌ 無效的座標格式"))
         return
     if not (-90 <= lat_f <= 90 and -180 <= lng_f <= 180):
-        _root.after(0, lambda: _status.config(text="❌ 座標超出範圍"))
+        _root.after(0, lambda: _status.configure(text="❌ 座標超出範圍"))
         return
 
     if _fetch_name:
         def fetch_info():
             info = fetch_name_time(lat, lng)
             def update_info():
-                _location_name_label.config(text=info.get("addr", ""), fg="gray")
+                _location_name_label.configure(text=info.get("addr", ""), text_color=SECONDARY)
                 lt = info.get("local_time", "")
                 tz = info.get("timezone", "")
-                _location_time_label.config(
-                    text=f"🕐 當地時間 {lt}（{tz}）" if lt else "", fg="gray"
+                _location_time_label.configure(
+                    text=f"🕐 當地時間 {lt}（{tz}）" if lt else "",
+                    text_color=SECONDARY,
                 )
             _root.after(0, update_info)
         threading.Thread(target=fetch_info, daemon=True).start()
@@ -107,9 +114,9 @@ def set_location_direct(lat: str, lng: str, save_history: bool = True, _fetch_na
                         on_selected=lambda: set_location_direct(lat, lng, save_history, _fetch_name)
                     )
                 elif result.code == "PARAM_ERROR":
-                    _status.config(text=f"❌ {result.message}")
+                    _status.configure(text=f"❌ {result.message}")
                 else:
-                    _status.config(text=f"❌ {result.message[:60]}")
+                    _status.configure(text=f"❌ {result.message[:60]}")
                 return
 
             if save_history:
@@ -119,7 +126,7 @@ def set_location_direct(lat: str, lng: str, save_history: bool = True, _fetch_na
             _lat_entry.insert(0, lat)
             _lng_entry.delete(0, "end")
             _lng_entry.insert(0, lng)
-            _status.config(text=f"✅ {result.message}")
+            _status.configure(text=f"✅ {result.message}")
 
         _root.after(0, update_ui)
 
@@ -132,11 +139,11 @@ def clear_location():
 
         def update_ui():
             if result.ok:
-                _status.config(text="✅ 已清除")
-                _location_name_label.config(text="", fg="gray")
-                _location_time_label.config(text="", fg="gray")
+                _status.configure(text="✅ 已清除")
+                _location_name_label.configure(text="", text_color=SECONDARY)
+                _location_time_label.configure(text="", text_color=SECONDARY)
             else:
-                _status.config(text=f"❌ {result.message[:50]}")
+                _status.configure(text=f"❌ {result.message[:50]}")
 
         _root.after(0, update_ui)
 

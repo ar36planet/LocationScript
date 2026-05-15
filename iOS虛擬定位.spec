@@ -5,6 +5,7 @@ from version import __version__
 from PyInstaller.utils.hooks import collect_all, copy_metadata
 
 pmd3_datas, pmd3_binaries, pmd3_hiddenimports = collect_all('pymobiledevice3')
+ctk_datas, ctk_binaries, ctk_hiddenimports = collect_all('customtkinter')
 
 extra_metadata = (
     copy_metadata('readchar')
@@ -15,9 +16,9 @@ extra_metadata = (
 a = Analysis(
     ['app.py'],
     pathex=[],
-    binaries=pmd3_binaries,
-    datas=pmd3_datas + extra_metadata,
-    hiddenimports=pmd3_hiddenimports,
+    binaries=pmd3_binaries + ctk_binaries,
+    datas=pmd3_datas + ctk_datas + extra_metadata,
+    hiddenimports=pmd3_hiddenimports + ctk_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

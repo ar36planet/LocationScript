@@ -31,7 +31,7 @@ jobs:
       - name: Install dependencies
         run: |
           pipx install pymobiledevice3
-          pip install pyinstaller pymobiledevice3 readchar inquirer3
+          pip install pyinstaller pymobiledevice3 readchar inquirer3 customtkinter
 
       - name: Read version
         id: version

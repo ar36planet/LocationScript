@@ -2,41 +2,54 @@ import tkinter as tk
 from tkinter import messagebox, filedialog
 import re
 import json
+
+import customtkinter as ctk
+
 import route_planner
 import gpx_to_route
+from ui.theme import (
+    PRIMARY, SECONDARY, FONT_BODY, FONT_SMALL, FONT_MONO,
+    PAD_SM, PAD_MD, CORNER_RADIUS, BUTTON_HEIGHT, BTN_SECONDARY, BTN_SECONDARY_HOVER, BTN_TEXT,
+)
 
 
 class ListEditorWindow:
     """另開 Toplevel 視窗，提供多行座標輸入與解析，套用後可在主視窗清單面板巡邏。"""
 
     def __init__(self, parent, *, location_fn, coord_list_items, on_apply, on_status):
-        """
-        parent:           Tk root 視窗
-        location_fn:      set_location_direct 的參照
-        coord_list_items: 主視窗共用的清單物件（直接操作同一個 list）
-        on_apply():       套用後呼叫（負責更新主視窗 listbox）
-        on_status(text):  更新主視窗狀態列
-        """
         self._location_fn = location_fn
         self._coord_list_items = coord_list_items
         self._on_apply = on_apply
         self._on_status = on_status
         self._items: list = []
+        self._selected_idx: int | None = None
+        self._row_buttons: list[ctk.CTkButton] = []
 
-        self.win = tk.Toplevel(parent)
+        self.win = ctk.CTkToplevel(parent)
         self.win.title("清單編輯器")
-        self.win.geometry("820x440")
+        self.win.geometry("820x600")
         self.win.resizable(True, True)
         self.win.protocol("WM_DELETE_WINDOW", self.win.destroy)
 
         self._build_ui()
 
     def _build_ui(self):
-        outer = tk.Frame(self.win, padx=12, pady=10)
-        outer.pack(fill=tk.BOTH, expand=True)
+        outer = ctk.CTkFrame(self.win, fg_color="transparent")
+        outer.pack(fill="both", expand=True, padx=PAD_MD, pady=PAD_MD)
+        outer.rowconfigure(0, weight=1)
+        outer.rowconfigure(1, weight=1)
+        outer.columnconfigure(0, weight=1)
 
-        input_lf = tk.LabelFrame(outer, text="輸入座標（每行一筆）", padx=8, pady=8)
-        input_lf.pack(fill=tk.BOTH, expand=True)
+        # ── 輸入區 ────────────────────────────────────────────────────────────
+        input_section = ctk.CTkFrame(outer, corner_radius=CORNER_RADIUS)
+        input_section.grid(row=0, column=0, sticky="nsew", pady=(0, PAD_SM))
+        input_section.rowconfigure(1, weight=1)
+        input_section.columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(input_section, text="輸入座標（每行一筆）",
+                     font=FONT_SMALL, text_color=SECONDARY).grid(
+            row=0, column=0, sticky="w", padx=PAD_MD, pady=(PAD_SM, 2)
+        )
 
         hint_text = (
             "格式（每行一筆，# 開頭為註解）：\n"
@@ -44,53 +57,79 @@ class ListEditorWindow:
             "  緯度 經度          →  25.040 121.570\n"
             "  名稱 緯度 經度     →  台北車站 25.047924 121.517081"
         )
-        tk.Label(input_lf, text=hint_text, fg="gray", font=("Menlo", 10), justify="left").pack(anchor="w", pady=(0, 4))
+        ctk.CTkLabel(input_section, text=hint_text, font=FONT_SMALL,
+                     text_color=SECONDARY, justify="left").grid(
+            row=1, column=0, sticky="w", padx=PAD_MD, pady=(0, 4)
+        )
 
-        text_frame = tk.Frame(input_lf)
-        text_frame.pack(fill=tk.BOTH, expand=True)
-        vsb = tk.Scrollbar(text_frame)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y)
-        self.text_input = tk.Text(text_frame, height=8, yscrollcommand=vsb.set, font=("Menlo", 12))
-        self.text_input.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        vsb.config(command=self.text_input.yview)
+        self.text_input = ctk.CTkTextbox(
+            input_section, height=120, font=FONT_MONO,
+        )
+        self.text_input.grid(row=2, column=0, sticky="nsew", padx=PAD_MD, pady=(0, PAD_SM))
 
-        ctrl_row = tk.Frame(input_lf)
-        ctrl_row.pack(fill=tk.X, pady=(6, 0))
-        tk.Label(ctrl_row, text="預設停留秒數：").pack(side=tk.LEFT)
-        self.dwell_entry = tk.Entry(ctrl_row, width=6)
-        self.dwell_entry.insert(0, "60")
-        self.dwell_entry.pack(side=tk.LEFT)
-        tk.Button(ctrl_row, text="✅ 解析並載入", command=self._parse_and_load).pack(side=tk.LEFT, padx=10)
-        tk.Button(ctrl_row, text="📂 匯入 GPX", command=self._import_gpx).pack(side=tk.LEFT)
+        ctrl_row = ctk.CTkFrame(input_section, fg_color="transparent")
+        ctrl_row.grid(row=3, column=0, sticky="ew", padx=PAD_MD, pady=(0, PAD_SM))
 
-        result_lf = tk.LabelFrame(outer, text="解析結果", padx=8, pady=8)
-        result_lf.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+        ctk.CTkLabel(ctrl_row, text="預設停留秒數：", font=FONT_BODY).pack(side="left")
+        self.dwell_entry = ctk.CTkEntry(ctrl_row, width=60, height=BUTTON_HEIGHT, font=FONT_BODY)
+        self.dwell_entry.insert(0, "1")
+        self.dwell_entry.pack(side="left", padx=(4, 0))
 
-        list_top = tk.Frame(result_lf)
-        list_top.pack(fill=tk.X)
-        self.count_label = tk.Label(list_top, text="共 0 筆", fg="gray")
-        self.count_label.pack(side=tk.LEFT)
-        tk.Button(list_top, text="✅ 套用到主視窗", command=self._apply_to_main).pack(side=tk.RIGHT)
-        tk.Button(list_top, text="💾 儲存 JSON", command=self._save_json).pack(side=tk.RIGHT, padx=4)
-        tk.Button(list_top, text="🌸 規劃最佳路線", command=self._plan_route).pack(side=tk.RIGHT, padx=4)
-        tk.Button(list_top, text="🔄 外圈巡邏", command=self._orbit_route).pack(side=tk.RIGHT, padx=4)
-        tk.Button(list_top, text="🍎 種果路線", command=self._fruit_route).pack(side=tk.RIGHT, padx=4)
-        self.plan_speed_entry = tk.Entry(list_top, width=5, font=("", 9))
+        ctk.CTkButton(ctrl_row, text="✅ 解析並載入", command=self._parse_and_load,
+                      height=BUTTON_HEIGHT, font=FONT_BODY).pack(side="left", padx=(PAD_MD, 0))
+        ctk.CTkButton(ctrl_row, text="📂 匯入 GPX", command=self._import_gpx,
+                      height=BUTTON_HEIGHT, font=FONT_BODY,
+                      fg_color=BTN_SECONDARY, hover_color=BTN_SECONDARY_HOVER, text_color=BTN_TEXT).pack(side="left", padx=(PAD_SM, 0))
+
+        # ── 解析結果區 ────────────────────────────────────────────────────────
+        result_section = ctk.CTkFrame(outer, corner_radius=CORNER_RADIUS)
+        result_section.grid(row=1, column=0, sticky="nsew")
+        result_section.rowconfigure(1, weight=1)
+        result_section.columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(result_section, text="解析結果",
+                     font=FONT_SMALL, text_color=SECONDARY).grid(
+            row=0, column=0, sticky="w", padx=PAD_MD, pady=(PAD_SM, 2)
+        )
+
+        list_top = ctk.CTkFrame(result_section, fg_color="transparent")
+        list_top.grid(row=0, column=0, sticky="ew", padx=PAD_MD, pady=(PAD_SM, 2))
+
+        self.count_label = ctk.CTkLabel(list_top, text="共 0 筆",
+                                        font=FONT_SMALL, text_color=SECONDARY)
+        self.count_label.pack(side="left")
+
+        ctk.CTkButton(list_top, text="✅ 套用到主視窗", command=self._apply_to_main,
+                      height=BUTTON_HEIGHT, font=FONT_BODY).pack(side="right")
+        ctk.CTkButton(list_top, text="💾 儲存 JSON", command=self._save_json,
+                      height=BUTTON_HEIGHT, font=FONT_BODY,
+                      fg_color=BTN_SECONDARY, hover_color=BTN_SECONDARY_HOVER, text_color=BTN_TEXT).pack(side="right", padx=PAD_SM)
+        ctk.CTkButton(list_top, text="🌸 規劃最佳路線", command=self._plan_route,
+                      height=BUTTON_HEIGHT, font=FONT_BODY,
+                      fg_color=BTN_SECONDARY, hover_color=BTN_SECONDARY_HOVER, text_color=BTN_TEXT).pack(side="right", padx=(0, PAD_SM))
+        ctk.CTkButton(list_top, text="🔄 外圈巡邏", command=self._orbit_route,
+                      height=BUTTON_HEIGHT, font=FONT_BODY,
+                      fg_color=BTN_SECONDARY, hover_color=BTN_SECONDARY_HOVER, text_color=BTN_TEXT).pack(side="right", padx=(0, PAD_SM))
+        ctk.CTkButton(list_top, text="🍎 種果路線", command=self._fruit_route,
+                      height=BUTTON_HEIGHT, font=FONT_BODY,
+                      fg_color=BTN_SECONDARY, hover_color=BTN_SECONDARY_HOVER, text_color=BTN_TEXT).pack(side="right", padx=(0, PAD_SM))
+
+        speed_frame = ctk.CTkFrame(list_top, fg_color="transparent")
+        speed_frame.pack(side="right", padx=(0, PAD_SM))
+        ctk.CTkLabel(speed_frame, text="速度(km/h)：",
+                     font=FONT_SMALL, text_color=SECONDARY).pack(side="left")
+        self.plan_speed_entry = ctk.CTkEntry(speed_frame, width=48, height=BUTTON_HEIGHT, font=FONT_BODY)
         self.plan_speed_entry.insert(0, "20")
-        self.plan_speed_entry.pack(side=tk.RIGHT)
-        tk.Label(list_top, text="速度(km/h)：", font=("", 9), fg="gray").pack(side=tk.RIGHT, padx=(4, 0))
+        self.plan_speed_entry.pack(side="left")
 
-        lb_frame = tk.Frame(result_lf)
-        lb_frame.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
-        lb_sb = tk.Scrollbar(lb_frame)
-        lb_sb.pack(side=tk.RIGHT, fill=tk.Y)
-        self.result_lb = tk.Listbox(lb_frame, yscrollcommand=lb_sb.set, height=5, font=("Menlo", 12))
-        self.result_lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        lb_sb.config(command=self.result_lb.yview)
-        self.result_lb.bind("<<ListboxSelect>>", self._on_lb_select)
+        self._result_list = ctk.CTkScrollableFrame(result_section, corner_radius=CORNER_RADIUS)
+        self._result_list.grid(row=1, column=0, sticky="nsew",
+                               padx=PAD_MD, pady=(0, PAD_MD))
+        self._result_list.columnconfigure(0, weight=1)
+
+    # ── 資料 ──────────────────────────────────────────────────────────────────
 
     def load_from_items(self, items: list):
-        """以主視窗現有清單預填文字輸入區並觸發解析。"""
         if not items:
             return
         lines = []
@@ -102,9 +141,9 @@ class ListEditorWindow:
                 lines.append(f"{name} {lat} {lng}")
             else:
                 lines.append(f"{lat},{lng}")
-        self.text_input.delete("1.0", tk.END)
+        self.text_input.delete("1.0", "end")
         self.text_input.insert("1.0", "\n".join(lines))
-        self.dwell_entry.delete(0, tk.END)
+        self.dwell_entry.delete(0, "end")
         self.dwell_entry.insert(0, str(items[0].get("dwell", 60)))
         self._parse_and_load()
 
@@ -132,17 +171,46 @@ class ListEditorWindow:
                     pass
         return items
 
+    def _refresh_result_list(self):
+        for btn in self._row_buttons:
+            btn.destroy()
+        self._row_buttons.clear()
+        self._selected_idx = None
+
+        for idx, item in enumerate(self._items):
+            label = f"{item['name']}  ({item['dwell']}s)"
+            btn = ctk.CTkButton(
+                self._result_list,
+                text=label,
+                font=FONT_MONO,
+                anchor="w",
+                fg_color="transparent",
+                text_color=("black", "white"),
+                hover_color=("gray85", "gray25"),
+                height=28,
+                command=lambda i=idx: self._select_row(i),
+            )
+            btn.grid(row=idx, column=0, sticky="ew", pady=1)
+            self._row_buttons.append(btn)
+
+        self.count_label.configure(text=f"共 {len(self._items)} 筆")
+
+    def _select_row(self, idx: int):
+        if self._selected_idx is not None and self._selected_idx < len(self._row_buttons):
+            self._row_buttons[self._selected_idx].configure(fg_color="transparent")
+        self._selected_idx = idx
+        self._row_buttons[idx].configure(fg_color=(PRIMARY, PRIMARY))
+        item = self._items[idx]
+        self._location_fn(item["lat"], item["lng"])
+
     def _parse_and_load(self):
         try:
             default_dwell = max(1, int(self.dwell_entry.get().strip()))
         except ValueError:
             default_dwell = 60
-        text = self.text_input.get("1.0", tk.END)
+        text = self.text_input.get("1.0", "end")
         self._items = self._parse_lines(text, default_dwell)
-        self.result_lb.delete(0, tk.END)
-        for item in self._items:
-            self.result_lb.insert(tk.END, f"{item['name']}  ({item['dwell']}s)")
-        self.count_label.config(text=f"共 {len(self._items)} 筆")
+        self._refresh_result_list()
 
     def _import_gpx(self):
         filepath = filedialog.askopenfilename(
@@ -164,17 +232,7 @@ class ListEditorWindow:
             messagebox.showwarning("無座標", "GPX 檔案中找不到任何座標點")
             return
         self._items = gpx_to_route.to_route_json(points, dwell=default_dwell)
-        self.result_lb.delete(0, tk.END)
-        for item in self._items:
-            self.result_lb.insert(tk.END, f"{item['name']}  ({item['dwell']}s)")
-        self.count_label.config(text=f"共 {len(self._items)} 筆")
-
-    def _on_lb_select(self, _event):
-        sel = self.result_lb.curselection()
-        if not sel:
-            return
-        item = self._items[sel[0]]
-        self._location_fn(item["lat"], item["lng"])
+        self._refresh_result_list()
 
     def _plan_route(self):
         if len(self._items) < 2:
@@ -188,9 +246,8 @@ class ListEditorWindow:
 
         flowers = [(float(it["lat"]), float(it["lng"])) for it in self._items]
         result = route_planner.plan_route(flowers, speed_kmh=speed_kmh)
-        route = result["route"][:-1]  # 去掉回起點的重複點
+        route = result["route"][:-1]
 
-        # 將路線座標映射回原始 items（以 lat/lng 浮點值比對）
         lookup = {(float(it["lat"]), float(it["lng"])): it for it in self._items}
         reordered = [lookup[pt] for pt in route if pt in lookup]
 
@@ -199,16 +256,17 @@ class ListEditorWindow:
             return
 
         self._items = reordered
-        self.result_lb.delete(0, tk.END)
-        for item in self._items:
-            self.result_lb.insert(tk.END, f"{item['name']}  ({item['dwell']}s)")
-        self.count_label.config(text=f"共 {len(self._items)} 筆")
+        self._refresh_result_list()
 
         covered = len(result["covered"])
         total = len(flowers)
         dist = result["total_dist"]
         speed_mps = result["speed_mps"]
-        msg = f"有效花點：{covered}/{total}\n總距離：{dist:.0f} 公尺\n預估時間：{dist/speed_mps/60:.1f} 分鐘（{speed_kmh:.0f} km/h）"
+        msg = (
+            f"有效花點：{covered}/{total}\n"
+            f"總距離：{dist:.0f} 公尺\n"
+            f"預估時間：{dist/speed_mps/60:.1f} 分鐘（{speed_kmh:.0f} km/h）"
+        )
         if result["warnings"]:
             msg += "\n\n" + "\n".join(result["warnings"])
         messagebox.showinfo("路線規劃完成", msg)
@@ -230,10 +288,7 @@ class ListEditorWindow:
             return
 
         self._items = reordered
-        self.result_lb.delete(0, tk.END)
-        for item in self._items:
-            self.result_lb.insert(tk.END, f"{item['name']}  ({item['dwell']}s)")
-        self.count_label.config(text=f"共 {len(self._items)} 筆")
+        self._refresh_result_list()
 
         dist = result["total_dist"]
         try:
@@ -241,10 +296,12 @@ class ListEditorWindow:
         except ValueError:
             speed_kmh = 20.0
         speed_mps = speed_kmh / 3.6
-        messagebox.showinfo("種果路線規劃完成",
+        messagebox.showinfo(
+            "種果路線規劃完成",
             f"總距離：{dist:.0f} 公尺\n"
             f"預估時間：{dist/speed_mps/60:.1f} 分鐘（{speed_kmh:.0f} km/h）\n\n"
-            f"建議主視窗使用「單次」巡邏模式")
+            f"建議主視窗使用「單次」巡邏模式",
+        )
 
     def _orbit_route(self):
         if not self._items:
@@ -267,20 +324,11 @@ class ListEditorWindow:
             messagebox.showerror("規劃失敗", msg)
             return
 
-        new_items = []
-        for k, wp in enumerate(waypoints):
-            new_items.append({
-                "name": f"WP{k+1:02d}",
-                "lat":  f"{wp[0]:.8f}",
-                "lng":  f"{wp[1]:.8f}",
-                "dwell": default_dwell,
-            })
-
-        self._items = new_items
-        self.result_lb.delete(0, tk.END)
-        for item in self._items:
-            self.result_lb.insert(tk.END, f"{item['name']}  ({item['dwell']}s)")
-        self.count_label.config(text=f"共 {len(self._items)} 筆")
+        self._items = [
+            {"name": f"WP{k+1:02d}", "lat": f"{wp[0]:.8f}", "lng": f"{wp[1]:.8f}", "dwell": default_dwell}
+            for k, wp in enumerate(waypoints)
+        ]
+        self._refresh_result_list()
 
         n = len(waypoints)
         dist = sum(route_planner.haversine(waypoints[i], waypoints[(i + 1) % n])

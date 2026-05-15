@@ -5,17 +5,19 @@ import threading
 _root = None
 _status = None
 _tunnel_status = None
+_tunnel_switch = None
 _tunnel_check_id = None
 _device_check_id = None
 _last_udids: set = set()
 _device_check_running = False
 
 
-def setup(root, status_label, tunnel_status_label):
-    global _root, _status, _tunnel_status
+def setup(root, status_label, tunnel_status_label, tunnel_switch=None):
+    global _root, _status, _tunnel_status, _tunnel_switch
     _root = root
     _status = status_label
     _tunnel_status = tunnel_status_label
+    _tunnel_switch = tunnel_switch
 
 
 def cancel_check():
@@ -30,10 +32,16 @@ def cancel_check():
 
 def check_tunnel_status():
     global _tunnel_check_id
-    if tunnel_service.is_running():
-        _tunnel_status.config(text="🟢 Tunnel 運行中", fg="green")
+    running = tunnel_service.is_running()
+    if running:
+        _tunnel_status.configure(text="🟢 Tunnel 運行中", text_color="green")
     else:
-        _tunnel_status.config(text="🔴 Tunnel 未啟動", fg="red")
+        _tunnel_status.configure(text="🔴 Tunnel 未啟動", text_color="red")
+    if _tunnel_switch is not None:
+        if running and not _tunnel_switch.get():
+            _tunnel_switch.select()
+        elif not running and _tunnel_switch.get():
+            _tunnel_switch.deselect()
     _tunnel_check_id = _root.after(2000, check_tunnel_status)
 
 
@@ -59,7 +67,7 @@ def _check_device_change():
                     removed = _last_udids - current
                     added = current - _last_udids
                     if removed and added:
-                        _status.config(text="🔄 偵測到裝置切換，正在重啟 Tunnel...")
+                        _status.configure(text="🔄 偵測到裝置切換，正在重啟 Tunnel...")
                         _do_restart()
                 _last_udids = current
             finally:
@@ -78,9 +86,9 @@ def _do_restart():
 
         def update_ui():
             if result.ok:
-                _status.config(text="✅ Tunnel 已重啟（裝置切換）")
+                _status.configure(text="✅ Tunnel 已重啟（裝置切換）")
             else:
-                _status.config(text=f"❌ Tunnel 重啟失敗：{result.message[:50]}")
+                _status.configure(text=f"❌ Tunnel 重啟失敗：{result.message[:50]}")
 
         _root.after(0, update_ui)
 
@@ -88,7 +96,7 @@ def _do_restart():
 
 
 def start_tunnel():
-    _status.config(text="⏳ 正在啟動 Tunnel...")
+    _status.configure(text="⏳ 正在啟動 Tunnel...")
 
     def run():
         # Try passwordless background start first
@@ -96,26 +104,26 @@ def start_tunnel():
 
         def update_ui():
             if result.ok:
-                _status.config(text=f"✅ {result.message}")
+                _status.configure(text=f"✅ {result.message}")
                 return
             # NOPASSWD not configured — fall back to Terminal window for password prompt
             if result.data.get("sudo_nopasswd_ok") is False:
-                _status.config(text="🔑 需要輸入密碼，開啟終端機視窗...")
+                _status.configure(text="🔑 需要輸入密碼，開啟終端機視窗...")
 
                 def run_terminal():
                     result2 = tunnel_service.start_tunnel(headless=False)
 
                     def update_ui2():
                         if result2.ok:
-                            _status.config(text=f"✅ {result2.message}")
+                            _status.configure(text=f"✅ {result2.message}")
                         else:
-                            _status.config(text=f"❌ {result2.message[:60]}")
+                            _status.configure(text=f"❌ {result2.message[:60]}")
 
                     _root.after(0, update_ui2)
 
                 threading.Thread(target=run_terminal, daemon=True).start()
             else:
-                _status.config(text=f"❌ {result.message[:60]}")
+                _status.configure(text=f"❌ {result.message[:60]}")
 
         _root.after(0, update_ui)
 
@@ -123,16 +131,16 @@ def start_tunnel():
 
 
 def stop_tunnel():
-    _status.config(text="⏳ 正在停止 Tunnel...")
+    _status.configure(text="⏳ 正在停止 Tunnel...")
 
     def run():
         result = tunnel_service.stop_tunnel(headless=True)
 
         def update_ui():
             if result.ok:
-                _status.config(text=f"✅ {result.message}")
+                _status.configure(text=f"✅ {result.message}")
             else:
-                _status.config(text=f"❌ {result.message[:50]}")
+                _status.configure(text=f"❌ {result.message[:50]}")
 
         _root.after(0, update_ui)
 
