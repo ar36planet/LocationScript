@@ -1,5 +1,26 @@
 # Pikmin 地圖座標校準工具 規格書
 
+> **狀態：暫停（2026-05-16）**
+> Spike 結論見下方，繼續前需先決定觸發方式。
+
+---
+
+## Spike 結論（2026-05-16）
+
+| 項目 | 結果 |
+|------|------|
+| pynput 全域滑鼠監聽 | ✅ 可行（需 Input Monitoring 權限） |
+| CGEventTap suppress 右鍵 | ❌ 失敗，未簽署 Python script 無法取得修改事件的權限 |
+| 右鍵當觸發 | ❌ iPhone Mirroring 裡右鍵行為等同左鍵，會觸發遊戲 |
+| 中鍵當觸發 | ⚠️ 不影響遊戲，但會切換 macOS focus |
+| NSPanel non-activating | ❌ CustomTkinter 底層是 Tk，無法真正做到 non-activating |
+
+**待決定**：觸發「記錄座標」的方式
+- **A（建議）**：鍵盤熱鍵（如 F9），Pikmin Bloom 不使用鍵盤，衝突風險極低
+- **B**：另開 Swift 原生 App，有 NSPanel + CGEventTap，但需要學 Swift
+
+---
+
 ## 功能概述
 
 一個獨立的桌面工具，讓使用者能從 iPhone 上的 Pikmin Bloom 地圖取得任意點的真實地理座標。

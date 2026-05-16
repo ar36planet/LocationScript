@@ -376,6 +376,81 @@ def two_opt(route: List[Point], origin: Point,
     return best
 
 
+def flower_circles_route(
+    flowers: List[Point],
+    circle_radius_m: float = 30.0,
+    circle_steps: int = 8,
+) -> dict:
+    """
+    種花路線：TSP 排序後在每個花點繞一完整圓圈，圈與圈之間直線移動。
+
+    每個花點生成 circle_steps 個 waypoint，從「上一個花點方向」開始逆時針走一圈，
+    自然銜接下一個花點的圓圈，不折返。
+
+    回傳 dict：
+      waypoints      - 所有 waypoint 列表（循環路線，不重複首尾）
+      total_dist     - 總距離（公尺）
+      ordered_flowers - TSP 排序後的花點順序
+      warnings       - 警告訊息
+    """
+    if not flowers:
+        return {"waypoints": [], "total_dist": 0.0,
+                "ordered_flowers": [], "warnings": []}
+
+    warnings: List[str] = []
+    if circle_radius_m > FLOWER_RADIUS_M:
+        warnings.append(
+            f"⚠️ 圓圈半徑 {circle_radius_m:.0f}m 超過有效範圍 {FLOWER_RADIUS_M:.0f}m，"
+            f"自動縮減至 {FLOWER_RADIUS_M * 0.9:.0f}m"
+        )
+        circle_radius_m = FLOWER_RADIUS_M * 0.9
+
+    if len(flowers) == 1:
+        origin = flowers[0]
+        fm = to_meters(flowers[0], origin)
+        waypoints = [
+            from_meters(
+                (fm[0] + circle_radius_m * math.cos(math.radians(90 + 360 * j / circle_steps)),
+                 fm[1] + circle_radius_m * math.sin(math.radians(90 + 360 * j / circle_steps))),
+                origin,
+            )
+            for j in range(circle_steps)
+        ]
+        n = len(waypoints)
+        total_dist = sum(haversine(waypoints[i], waypoints[(i+1) % n]) for i in range(n))
+        return {"waypoints": waypoints, "total_dist": total_dist,
+                "ordered_flowers": flowers[:], "warnings": warnings}
+
+    # TSP 排序（借用 fruit_route 的最短路徑邏輯）
+    fr = fruit_route(flowers)
+    ordered = fr["route"]
+    origin = flowers[0]
+    waypoints: List[Point] = []
+
+    for i, flower in enumerate(ordered):
+        fm = to_meters(flower, origin)
+        # 入圓方向：從前一個花點指向本花點的角度，反向即為「從哪裡來」
+        prev_flower = ordered[i - 1]   # i=0 時取 ordered[-1]，自然形成循環
+        prev_m = to_meters(prev_flower, origin)
+        start_angle = math.degrees(math.atan2(prev_m[1] - fm[1], prev_m[0] - fm[0]))
+
+        for j in range(circle_steps):
+            angle = start_angle + 360.0 * j / circle_steps
+            x = fm[0] + circle_radius_m * math.cos(math.radians(angle))
+            y = fm[1] + circle_radius_m * math.sin(math.radians(angle))
+            waypoints.append(from_meters((x, y), origin))
+
+    n = len(waypoints)
+    total_dist = sum(haversine(waypoints[i], waypoints[(i+1) % n]) for i in range(n))
+
+    return {
+        "waypoints": waypoints,
+        "total_dist": total_dist,
+        "ordered_flowers": ordered,
+        "warnings": warnings,
+    }
+
+
 def plan_route(flowers: List[Point], speed_kmh: float = WALK_SPEED_MPS * 3.6) -> dict:
     """
     主函式：嘗試所有起點，回傳最佳結果。

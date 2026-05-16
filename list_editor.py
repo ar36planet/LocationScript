@@ -7,6 +7,7 @@ import customtkinter as ctk
 
 import route_planner
 import gpx_to_route
+from route_preview import RoutePreviewWindow
 from ui.theme import (
     PRIMARY, SECONDARY, FONT_BODY, FONT_SMALL, FONT_MONO,
     PAD_SM, PAD_MD, CORNER_RADIUS, BUTTON_HEIGHT, BTN_SECONDARY, BTN_SECONDARY_HOVER, BTN_TEXT,
@@ -24,10 +25,11 @@ class ListEditorWindow:
         self._items: list = []
         self._selected_idx: int | None = None
         self._row_buttons: list[ctk.CTkButton] = []
+        self._source_flowers: list | None = None  # 記錄種花路線的原始花點，供預覽用
 
         self.win = ctk.CTkToplevel(parent)
         self.win.title("清單編輯器")
-        self.win.geometry("820x600")
+        self.win.geometry("960x800")
         self.win.resizable(True, True)
         self.win.protocol("WM_DELETE_WINDOW", self.win.destroy)
 
@@ -43,7 +45,7 @@ class ListEditorWindow:
         # ── 輸入區 ────────────────────────────────────────────────────────────
         input_section = ctk.CTkFrame(outer, corner_radius=CORNER_RADIUS)
         input_section.grid(row=0, column=0, sticky="nsew", pady=(0, PAD_SM))
-        input_section.rowconfigure(1, weight=1)
+        input_section.rowconfigure(2, weight=1)
         input_section.columnconfigure(0, weight=1)
 
         ctk.CTkLabel(input_section, text="輸入座標（每行一筆）",
@@ -99,11 +101,6 @@ class ListEditorWindow:
                                         font=FONT_SMALL, text_color=SECONDARY)
         self.count_label.pack(side="left")
 
-        ctk.CTkButton(list_top, text="✅ 套用到主視窗", command=self._apply_to_main,
-                      height=BUTTON_HEIGHT, font=FONT_BODY).pack(side="right")
-        ctk.CTkButton(list_top, text="💾 儲存 JSON", command=self._save_json,
-                      height=BUTTON_HEIGHT, font=FONT_BODY,
-                      fg_color=BTN_SECONDARY, hover_color=BTN_SECONDARY_HOVER, text_color=BTN_TEXT).pack(side="right", padx=PAD_SM)
         ctk.CTkButton(list_top, text="🌸 規劃最佳路線", command=self._plan_route,
                       height=BUTTON_HEIGHT, font=FONT_BODY,
                       fg_color=BTN_SECONDARY, hover_color=BTN_SECONDARY_HOVER, text_color=BTN_TEXT).pack(side="right", padx=(0, PAD_SM))
@@ -111,6 +108,9 @@ class ListEditorWindow:
                       height=BUTTON_HEIGHT, font=FONT_BODY,
                       fg_color=BTN_SECONDARY, hover_color=BTN_SECONDARY_HOVER, text_color=BTN_TEXT).pack(side="right", padx=(0, PAD_SM))
         ctk.CTkButton(list_top, text="🍎 種果路線", command=self._fruit_route,
+                      height=BUTTON_HEIGHT, font=FONT_BODY,
+                      fg_color=BTN_SECONDARY, hover_color=BTN_SECONDARY_HOVER, text_color=BTN_TEXT).pack(side="right", padx=(0, PAD_SM))
+        ctk.CTkButton(list_top, text="👁 預覽路線", command=self._preview_route,
                       height=BUTTON_HEIGHT, font=FONT_BODY,
                       fg_color=BTN_SECONDARY, hover_color=BTN_SECONDARY_HOVER, text_color=BTN_TEXT).pack(side="right", padx=(0, PAD_SM))
 
@@ -124,8 +124,17 @@ class ListEditorWindow:
 
         self._result_list = ctk.CTkScrollableFrame(result_section, corner_radius=CORNER_RADIUS)
         self._result_list.grid(row=1, column=0, sticky="nsew",
-                               padx=PAD_MD, pady=(0, PAD_MD))
+                               padx=PAD_MD, pady=(0, PAD_SM))
         self._result_list.columnconfigure(0, weight=1)
+
+        action_bar = ctk.CTkFrame(result_section, fg_color="transparent")
+        action_bar.grid(row=2, column=0, sticky="ew", padx=PAD_MD, pady=(0, PAD_MD))
+        ctk.CTkButton(action_bar, text="✅ 套用到主視窗", command=self._apply_to_main,
+                      height=BUTTON_HEIGHT, font=FONT_BODY).pack(side="right")
+        ctk.CTkButton(action_bar, text="💾 儲存 JSON", command=self._save_json,
+                      height=BUTTON_HEIGHT, font=FONT_BODY,
+                      fg_color=BTN_SECONDARY, hover_color=BTN_SECONDARY_HOVER,
+                      text_color=BTN_TEXT).pack(side="right", padx=(0, PAD_SM))
 
     # ── 資料 ──────────────────────────────────────────────────────────────────
 
@@ -200,8 +209,6 @@ class ListEditorWindow:
             self._row_buttons[self._selected_idx].configure(fg_color="transparent")
         self._selected_idx = idx
         self._row_buttons[idx].configure(fg_color=(PRIMARY, PRIMARY))
-        item = self._items[idx]
-        self._location_fn(item["lat"], item["lng"])
 
     def _parse_and_load(self):
         try:
@@ -235,8 +242,8 @@ class ListEditorWindow:
         self._refresh_result_list()
 
     def _plan_route(self):
-        if len(self._items) < 2:
-            messagebox.showwarning("花點不足", "請先解析至少 2 個座標")
+        if len(self._items) < 1:
+            messagebox.showwarning("花點不足", "請先解析至少 1 個座標")
             return
 
         try:
@@ -244,26 +251,35 @@ class ListEditorWindow:
         except ValueError:
             speed_kmh = 20.0
 
+        try:
+            default_dwell = max(0, int(self.dwell_entry.get().strip()))
+        except ValueError:
+            default_dwell = 0
+
         flowers = [(float(it["lat"]), float(it["lng"])) for it in self._items]
-        result = route_planner.plan_route(flowers, speed_kmh=speed_kmh)
-        route = result["route"][:-1]
+        self._source_flowers = flowers  # 記下原始花點供預覽使用
+        result = route_planner.flower_circles_route(flowers)
+        waypoints = result["waypoints"]
 
-        lookup = {(float(it["lat"]), float(it["lng"])): it for it in self._items}
-        reordered = [lookup[pt] for pt in route if pt in lookup]
-
-        if not reordered:
-            messagebox.showerror("規劃失敗", "無法映射路線到清單")
+        if not waypoints:
+            msg = "無法產生路線"
+            if result["warnings"]:
+                msg += "\n\n" + "\n".join(result["warnings"])
+            messagebox.showerror("規劃失敗", msg)
             return
 
-        self._items = reordered
+        self._items = [
+            {"name": f"WP{k+1:02d}", "lat": f"{wp[0]:.8f}",
+             "lng": f"{wp[1]:.8f}", "dwell": default_dwell}
+            for k, wp in enumerate(waypoints)
+        ]
         self._refresh_result_list()
 
-        covered = len(result["covered"])
-        total = len(flowers)
         dist = result["total_dist"]
-        speed_mps = result["speed_mps"]
+        speed_mps = speed_kmh / 3.6
         msg = (
-            f"有效花點：{covered}/{total}\n"
+            f"花點：{len(flowers)} 個\n"
+            f"路線點：{len(waypoints)} 個\n"
             f"總距離：{dist:.0f} 公尺\n"
             f"預估時間：{dist/speed_mps/60:.1f} 分鐘（{speed_kmh:.0f} km/h）"
         )
@@ -277,6 +293,7 @@ class ListEditorWindow:
             return
 
         flowers = [(float(it["lat"]), float(it["lng"])) for it in self._items]
+        self._source_flowers = flowers
         result = route_planner.fruit_route(flowers)
         route = result["route"]
 
@@ -314,6 +331,7 @@ class ListEditorWindow:
             default_dwell = 0
 
         flowers = [(float(it["lat"]), float(it["lng"])) for it in self._items]
+        self._source_flowers = flowers
         result = route_planner.orbit_route(flowers)
         waypoints = result["waypoints"]
 
@@ -347,6 +365,13 @@ class ListEditorWindow:
         if result["warnings"]:
             info_msg += "\n\n" + "\n".join(result["warnings"])
         messagebox.showinfo("外圈巡邏路線", info_msg)
+
+    def _preview_route(self):
+        if not self._items:
+            messagebox.showwarning("清單為空", "請先解析或規劃路線")
+            return
+        waypoints = [(float(it["lat"]), float(it["lng"])) for it in self._items]
+        RoutePreviewWindow(self.win, waypoints, flowers=self._source_flowers)
 
     def _apply_to_main(self):
         self._coord_list_items.clear()

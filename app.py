@@ -21,6 +21,7 @@ from core.location_service import (
     set_session_udid, clear_session_udid, fetch_timezone_time,
 )
 from list_editor import ListEditorWindow
+from route_preview import RoutePreviewWindow
 from version import __version__
 from ui.theme import (
     apply as _apply_theme, PRIMARY, SECONDARY,
@@ -147,6 +148,7 @@ def refresh_main_listbox():
         btn.destroy()
     _coord_row_buttons.clear()
     _coord_selected_idx = None
+    _update_start_label()
 
     for idx, item in enumerate(coord_list_items):
         btn = ctk.CTkButton(
@@ -175,12 +177,24 @@ def _select_coord_row(idx: int):
     _coord_selected_idx = idx
     if idx < len(_coord_row_buttons):
         _coord_row_buttons[idx].configure(fg_color=(PRIMARY, PRIMARY))
+    _update_start_label()
     item = coord_list_items[idx]
     lat_entry.delete(0, "end")
     lat_entry.insert(0, item["lat"])
     lng_entry.delete(0, "end")
     lng_entry.insert(0, item["lng"])
     set_location()
+
+
+def _update_start_label():
+    try:
+        if _coord_selected_idx is not None and _coord_selected_idx < len(coord_list_items):
+            name = coord_list_items[_coord_selected_idx].get("name", f"#{_coord_selected_idx + 1}")
+            patrol_start_label.configure(text=f"起 {name}")
+        else:
+            patrol_start_label.configure(text="起 #1")
+    except NameError:
+        pass
 
 
 def _highlight_coord_row(idx: int):
@@ -209,6 +223,14 @@ def load_coord_list():
         status.configure(text=f"✅ 已載入 {len(coord_list_items)} 筆座標")
     except Exception as e:
         status.configure(text=f"❌ 載入失敗：{str(e)[:50]}")
+
+
+def preview_coord_list():
+    if not coord_list_items:
+        messagebox.showwarning("清單為空", "請先載入座標清單")
+        return
+    waypoints = [(float(it["lat"]), float(it["lng"])) for it in coord_list_items]
+    RoutePreviewWindow(root, waypoints, flowers=waypoints)
 
 
 def clear_coord_list():
@@ -687,6 +709,9 @@ ctk.CTkButton(list_top, text="✏️ 編輯清單", command=open_list_editor,
 ctk.CTkButton(list_top, text="🗑️ 清除", command=clear_coord_list,
               height=28, font=FONT_SMALL,
               fg_color=BTN_SECONDARY, hover_color=BTN_SECONDARY_HOVER, text_color=BTN_TEXT).pack(side="left", padx=(4, 0))
+ctk.CTkButton(list_top, text="👁 預覽", command=preview_coord_list,
+              height=28, font=FONT_SMALL,
+              fg_color=BTN_SECONDARY, hover_color=BTN_SECONDARY_HOVER, text_color=BTN_TEXT).pack(side="left", padx=(4, 0))
 list_count_label = ctk.CTkLabel(list_top, text="", font=FONT_SMALL, text_color=SECONDARY)
 list_count_label.pack(side="left", padx=(PAD_SM, 0))
 
@@ -715,6 +740,11 @@ btn_main_patrol_stop = ctk.CTkButton(
     state="disabled", fg_color=BTN_SECONDARY, hover_color=BTN_SECONDARY_HOVER, text_color=BTN_TEXT,
 )
 btn_main_patrol_stop.pack(side="left")
+patrol_start_label = ctk.CTkLabel(
+    patrol_ctrl_frame, text="起 #1",
+    font=FONT_SMALL, text_color=SECONDARY,
+)
+patrol_start_label.pack(side="left", padx=(8, 0))
 
 patrol_status_label = ctk.CTkLabel(list_frame, text="", font=FONT_SMALL,
                                     text_color=SECONDARY, anchor="w")
