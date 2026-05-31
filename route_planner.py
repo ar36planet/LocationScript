@@ -416,9 +416,11 @@ def flower_circles_route(
             )
             for j in range(circle_steps)
         ]
+        # j=0 是從上一圈抵達的過渡點，其餘為圈內
+        in_zones = [j > 0 for j in range(circle_steps)]
         n = len(waypoints)
         total_dist = sum(haversine(waypoints[i], waypoints[(i+1) % n]) for i in range(n))
-        return {"waypoints": waypoints, "total_dist": total_dist,
+        return {"waypoints": waypoints, "in_zones": in_zones, "total_dist": total_dist,
                 "ordered_flowers": flowers[:], "warnings": warnings}
 
     # TSP 排序（借用 fruit_route 的最短路徑邏輯）
@@ -426,11 +428,11 @@ def flower_circles_route(
     ordered = fr["route"]
     origin = flowers[0]
     waypoints: List[Point] = []
+    in_zones: List[bool] = []
 
     for i, flower in enumerate(ordered):
         fm = to_meters(flower, origin)
-        # 入圓方向：從前一個花點指向本花點的角度，反向即為「從哪裡來」
-        prev_flower = ordered[i - 1]   # i=0 時取 ordered[-1]，自然形成循環
+        prev_flower = ordered[i - 1]
         prev_m = to_meters(prev_flower, origin)
         start_angle = math.degrees(math.atan2(prev_m[1] - fm[1], prev_m[0] - fm[0]))
 
@@ -439,12 +441,14 @@ def flower_circles_route(
             x = fm[0] + circle_radius_m * math.cos(math.radians(angle))
             y = fm[1] + circle_radius_m * math.sin(math.radians(angle))
             waypoints.append(from_meters((x, y), origin))
+            in_zones.append(j > 0)  # j=0 是圈間過渡抵達點，j>0 是圈內移動
 
     n = len(waypoints)
     total_dist = sum(haversine(waypoints[i], waypoints[(i+1) % n]) for i in range(n))
 
     return {
         "waypoints": waypoints,
+        "in_zones": in_zones,
         "total_dist": total_dist,
         "ordered_flowers": ordered,
         "warnings": warnings,

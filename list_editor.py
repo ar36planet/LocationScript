@@ -268,9 +268,11 @@ class ListEditorWindow:
             messagebox.showerror("規劃失敗", msg)
             return
 
+        in_zones = result.get("in_zones", [False] * len(waypoints))
         self._items = [
             {"name": f"WP{k+1:02d}", "lat": f"{wp[0]:.8f}",
-             "lng": f"{wp[1]:.8f}", "dwell": default_dwell}
+             "lng": f"{wp[1]:.8f}", "dwell": default_dwell,
+             "in_zone": in_zones[k]}
             for k, wp in enumerate(waypoints)
         ]
         self._refresh_result_list()

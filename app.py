@@ -21,7 +21,7 @@ from core.location_service import (
     set_session_udid, clear_session_udid, fetch_timezone_time,
 )
 from list_editor import ListEditorWindow
-from route_preview import RoutePreviewWindow
+from route_preview import RoutePreviewWindow, draw_on_canvas
 from version import __version__
 from ui.theme import (
     apply as _apply_theme, PRIMARY, SECONDARY,
@@ -41,6 +41,7 @@ _coord_row_buttons: list[ctk.CTkButton] = []
 _coord_selected_idx: int | None = None
 patrol_controller = None
 _patrol_paused = False
+_preview_visible = False
 _session_devices: list[dict] = []
 _device_label_timer_id = None
 _device_label_running = False
@@ -166,6 +167,8 @@ def refresh_main_listbox():
         _coord_row_buttons.append(btn)
 
     list_count_label.configure(text=f"共 {len(coord_list_items)} 筆")
+    if _preview_visible:
+        root.after(20, _redraw_preview_canvas)
 
 
 def _select_coord_row(idx: int):
@@ -225,12 +228,25 @@ def load_coord_list():
         status.configure(text=f"❌ 載入失敗：{str(e)[:50]}")
 
 
-def preview_coord_list():
-    if not coord_list_items:
-        messagebox.showwarning("清單為空", "請先載入座標清單")
+def _redraw_preview_canvas():
+    if not _preview_visible or not coord_list_items:
         return
     waypoints = [(float(it["lat"]), float(it["lng"])) for it in coord_list_items]
-    RoutePreviewWindow(root, waypoints, flowers=waypoints)
+    in_zones = [bool(it.get("in_zone")) for it in coord_list_items]
+    draw_on_canvas(_preview_canvas, waypoints, in_zones=in_zones)
+
+
+def toggle_preview_canvas():
+    global _preview_visible
+    if not coord_list_items:
+        return
+    if _preview_visible:
+        _preview_panel.grid_remove()
+        _preview_visible = False
+    else:
+        _preview_panel.grid(row=0, column=6, rowspan=12, sticky="nsew", padx=(8, 0))
+        _preview_visible = True
+        root.after(30, _redraw_preview_canvas)
 
 
 def clear_coord_list():
@@ -405,10 +421,22 @@ def start_main_patrol():
         speed = max(0.0, float(patrol_speed_entry.get().strip()))
     except ValueError:
         speed = 20.0
+    try:
+        circle_speed = max(0.0, float(patrol_circle_speed_entry.get().strip()))
+        circle_speed = circle_speed if circle_speed > 0 else None
+    except ValueError:
+        circle_speed = None
+    try:
+        dwell = int(patrol_dwell_entry.get().strip())
+        dwell = dwell if dwell > 0 else None
+    except ValueError:
+        dwell = None
     patrol_controller.on_tick = main_patrol_tick
     patrol_controller.on_travel = main_patrol_travel
     patrol_controller.on_finish = on_patrol_finish
-    patrol_controller.start(coord_list_items, start_idx, speed_kmh=speed, mode=patrol_mode_var.get())
+    patrol_controller.start(coord_list_items, start_idx, speed_kmh=speed,
+                            circle_speed_kmh=circle_speed, dwell_override=dwell,
+                            mode=patrol_mode_var.get())
     btn_main_patrol_start.configure(state="disabled")
     btn_main_patrol_pause.configure(state="normal", text="⏸ 暫停")
     btn_main_patrol_stop.configure(state="normal")
@@ -589,8 +617,8 @@ _apply_theme()
 
 root = ctk.CTk()
 root.title(f"iOS 虛擬定位 v{__version__}")
-root.geometry("1280x660")
-root.resizable(True, False)
+root.geometry("1920x1080")
+root.resizable(True, True)
 root.minsize(900, 560)
 root.protocol("WM_DELETE_WINDOW", on_closing)
 
@@ -598,6 +626,7 @@ frame = ctk.CTkFrame(root, fg_color="transparent")
 frame.pack(fill="both", expand=True, padx=20, pady=15)
 frame.columnconfigure(1, weight=1)
 frame.columnconfigure(5, weight=0)
+frame.columnconfigure(6, weight=2, minsize=420)
 
 # ── 頂部工具列：Tunnel / 版本 ────────────────────────────────────────────────
 top_row = ctk.CTkFrame(frame, fg_color="transparent")
@@ -709,7 +738,7 @@ ctk.CTkButton(list_top, text="✏️ 編輯清單", command=open_list_editor,
 ctk.CTkButton(list_top, text="🗑️ 清除", command=clear_coord_list,
               height=28, font=FONT_SMALL,
               fg_color=BTN_SECONDARY, hover_color=BTN_SECONDARY_HOVER, text_color=BTN_TEXT).pack(side="left", padx=(4, 0))
-ctk.CTkButton(list_top, text="👁 預覽", command=preview_coord_list,
+ctk.CTkButton(list_top, text="👁 預覽", command=toggle_preview_canvas,
               height=28, font=FONT_SMALL,
               fg_color=BTN_SECONDARY, hover_color=BTN_SECONDARY_HOVER, text_color=BTN_TEXT).pack(side="left", padx=(4, 0))
 list_count_label = ctk.CTkLabel(list_top, text="", font=FONT_SMALL, text_color=SECONDARY)
@@ -751,21 +780,40 @@ patrol_status_label = ctk.CTkLabel(list_frame, text="", font=FONT_SMALL,
 patrol_status_label.pack(fill="x", padx=PAD_MD, pady=(2, 0))
 
 speed_row = ctk.CTkFrame(list_frame, fg_color="transparent")
-speed_row.pack(fill="x", padx=PAD_MD, pady=(2, PAD_MD))
+speed_row.pack(fill="x", padx=PAD_MD, pady=(2, 2))
 ctk.CTkLabel(speed_row, text="速度：", font=FONT_SMALL).pack(side="left")
-patrol_speed_entry = ctk.CTkEntry(speed_row, width=48, height=26, font=FONT_SMALL)
+patrol_speed_entry = ctk.CTkEntry(speed_row, width=44, height=26, font=FONT_SMALL)
 patrol_speed_entry.insert(0, "20")
 patrol_speed_entry.pack(side="left")
-ctk.CTkLabel(speed_row, text="km/h（0＝直跳）",
+ctk.CTkLabel(speed_row, text="km/h  圈內：",
              font=FONT_SMALL, text_color=SECONDARY).pack(side="left", padx=(4, 0))
+patrol_circle_speed_entry = ctk.CTkEntry(speed_row, width=44, height=26, font=FONT_SMALL)
+patrol_circle_speed_entry.insert(0, "5")
+patrol_circle_speed_entry.pack(side="left")
+ctk.CTkLabel(speed_row, text="km/h  停留：",
+             font=FONT_SMALL, text_color=SECONDARY).pack(side="left", padx=(4, 0))
+patrol_dwell_entry = ctk.CTkEntry(speed_row, width=36, height=26, font=FONT_SMALL)
+patrol_dwell_entry.insert(0, "0")
+patrol_dwell_entry.pack(side="left")
+ctk.CTkLabel(speed_row, text="s", font=FONT_SMALL, text_color=SECONDARY).pack(side="left", padx=(2, 0))
 
+mode_row = ctk.CTkFrame(list_frame, fg_color="transparent")
+mode_row.pack(fill="x", padx=PAD_MD, pady=(0, PAD_MD))
 patrol_mode_var = tk.StringVar(value="loop")
-ctk.CTkRadioButton(speed_row, text="循環", variable=patrol_mode_var, value="loop",
+ctk.CTkRadioButton(mode_row, text="循環", variable=patrol_mode_var, value="loop",
+                    font=FONT_SMALL).pack(side="left")
+ctk.CTkRadioButton(mode_row, text="來回", variable=patrol_mode_var, value="pingpong",
                     font=FONT_SMALL).pack(side="left", padx=(PAD_SM, 0))
-ctk.CTkRadioButton(speed_row, text="來回", variable=patrol_mode_var, value="pingpong",
-                    font=FONT_SMALL).pack(side="left", padx=(4, 0))
-ctk.CTkRadioButton(speed_row, text="單次", variable=patrol_mode_var, value="once",
-                    font=FONT_SMALL).pack(side="left", padx=(4, 0))
+ctk.CTkRadioButton(mode_row, text="單次", variable=patrol_mode_var, value="once",
+                    font=FONT_SMALL).pack(side="left", padx=(PAD_SM, 0))
+
+# ── 路線預覽面板（list_frame 右側，主 grid column 6）────────────────────────
+_preview_panel = ctk.CTkFrame(frame, corner_radius=CORNER_RADIUS)
+_preview_canvas = tk.Canvas(_preview_panel, width=420, bg="#1e1e2e", highlightthickness=0)
+_preview_canvas.pack(fill="both", expand=True, padx=4, pady=4)
+_preview_canvas.bind("<Configure>", lambda e: _redraw_preview_canvas())
+_preview_panel.grid(row=0, column=6, rowspan=12, sticky="nsew", padx=(8, 0))
+_preview_panel.grid_remove()  # 預設隱藏
 
 # ── 左側輸入區 ────────────────────────────────────────────────────────────────
 

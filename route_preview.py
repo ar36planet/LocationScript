@@ -18,10 +18,105 @@ _PAD = 36
 _BG = "#1e1e2e"
 _RADIUS_COLOR = "#44475a"
 _ROUTE_COLOR = "#8be9fd"
+_INZONE_COLOR = "#50fa7b"
 _WP_DOT_COLOR = "#6272a4"
 _FLOWER_COLOR = "#ff79c6"
-_ARROW_COLOR = "#50fa7b"
+_ARROW_COLOR = "#ffb86c"
 _TEXT_COLOR = "#f8f8f2"
+
+
+def draw_on_canvas(canvas, waypoints, flowers=None, in_zones=None):
+    """Draw a route preview onto an existing tk.Canvas widget."""
+    c = canvas
+    c.delete("all")
+    cw = c.winfo_width() or _CANVAS_SIZE
+    ch = c.winfo_height() or _CANVAS_SIZE
+
+    flowers = list(flowers) if flowers else []
+    waypoints = list(waypoints) if waypoints else []
+    all_pts = flowers + waypoints
+    if not all_pts:
+        c.create_text(cw // 2, ch // 2, text="無資料", fill=_TEXT_COLOR)
+        return
+
+    origin = all_pts[0]
+    pts_m = [route_planner.to_meters(p, origin) for p in all_pts]
+    xs = [p[0] for p in pts_m]
+    ys = [p[1] for p in pts_m]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    x_span = max(max_x - min_x, 80)
+    y_span = max(max_y - min_y, 80)
+    mg = 0.18
+    min_x -= x_span * mg;  max_x += x_span * mg
+    min_y -= y_span * mg;  max_y += y_span * mg
+    x_span = max_x - min_x
+    y_span = max_y - min_y
+    avail_w = cw - 2 * _PAD
+    avail_h = ch - 2 * _PAD
+    scale = min(avail_w / x_span, avail_h / y_span)
+    ox = _PAD + (avail_w - x_span * scale) / 2 - min_x * scale
+    oy = ch - _PAD - (avail_h - y_span * scale) / 2 + min_y * scale
+
+    def to_px(lat, lng):
+        mx, my = route_planner.to_meters((lat, lng), origin)
+        return ox + mx * scale, oy - my * scale
+
+    r_px = route_planner.FLOWER_RADIUS_M * scale
+    for f in flowers:
+        cx, cy = to_px(*f)
+        c.create_oval(cx - r_px, cy - r_px, cx + r_px, cy + r_px,
+                      outline=_RADIUS_COLOR, width=1, dash=(5, 4))
+
+    iz = in_zones or []
+    wps = waypoints
+    if len(wps) >= 2:
+        # 逐段依 in_zone 上色：進入圈內的段用綠色，過境用藍色
+        for i in range(len(wps)):
+            j = (i + 1) % len(wps)
+            seg_inzone = iz[j] if j < len(iz) else False
+            color = _INZONE_COLOR if seg_inzone else _ROUTE_COLOR
+            x1, y1 = to_px(*wps[i])
+            x2, y2 = to_px(*wps[j])
+            c.create_line(x1, y1, x2, y2, fill=color, width=1.5)
+
+        step = max(1, len(wps) // 8)
+        for i in range(0, len(wps), step):
+            x1, y1 = to_px(*wps[i])
+            x2, y2 = to_px(*wps[(i + 1) % len(wps)])
+            mx, my = (x1 + x2) / 2, (y1 + y2) / 2
+            angle = math.atan2(y2 - y1, x2 - x1)
+            sz = 5
+            c.create_polygon(
+                mx + math.cos(angle) * sz, my + math.sin(angle) * sz,
+                mx + math.cos(angle + 2.5) * sz * 0.7, my + math.sin(angle + 2.5) * sz * 0.7,
+                mx + math.cos(angle - 2.5) * sz * 0.7, my + math.sin(angle - 2.5) * sz * 0.7,
+                fill=_ARROW_COLOR, outline="",
+            )
+
+    for i, wp in enumerate(wps):
+        x, y = to_px(*wp)
+        inzone = iz[i] if i < len(iz) else False
+        color = _INZONE_COLOR if inzone else _WP_DOT_COLOR
+        r = 3 if inzone else 2
+        c.create_oval(x - r, y - r, x + r, y + r, fill=color, outline="")
+
+    for i, f in enumerate(flowers):
+        x, y = to_px(*f)
+        c.create_oval(x - 5, y - 5, x + 5, y + 5,
+                      fill=_FLOWER_COLOR, outline="white", width=1)
+        c.create_text(x, y - 13, text=str(i + 1), fill=_FLOWER_COLOR, font=("", 9, "bold"))
+
+    candidates = [10, 20, 50, 100, 200, 500, 1000]
+    scale_m = min(candidates, key=lambda m: abs(m * scale - 60))
+    scale_px = scale_m * scale
+    sx1, sy = _PAD, ch - 14
+    sx2 = sx1 + scale_px
+    c.create_line(sx1, sy, sx2, sy, fill=_TEXT_COLOR, width=2)
+    for sx in (sx1, sx2):
+        c.create_line(sx, sy - 4, sx, sy + 4, fill=_TEXT_COLOR, width=2)
+    lbl = f"{scale_m}m" if scale_m < 1000 else f"{scale_m // 1000}km"
+    c.create_text((sx1 + sx2) / 2, sy - 10, text=lbl, fill=_TEXT_COLOR, font=("", 8))
 
 
 class RoutePreviewWindow(ctk.CTkToplevel):
@@ -147,63 +242,7 @@ class RoutePreviewWindow(ctk.CTkToplevel):
     # ── 繪圖 ─────────────────────────────────────────────────────────────────
 
     def _draw(self):
-        c = self._canvas
-        c.delete("all")
-
-        cw = c.winfo_width() or _CANVAS_SIZE
-        ch = c.winfo_height() or _CANVAS_SIZE
-
-        all_pts = self._flowers + self._waypoints
-        if not all_pts:
-            c.create_text(cw // 2, ch // 2, text="無資料", fill=_TEXT_COLOR)
-            return
-
-        self._setup_projection(all_pts, cw, ch)
-
-        # 有效半徑圈（虛線）
-        r_px = route_planner.FLOWER_RADIUS_M * self._scale
-        for f in self._flowers:
-            cx, cy = self._to_px(*f)
-            c.create_oval(cx - r_px, cy - r_px, cx + r_px, cy + r_px,
-                          outline=_RADIUS_COLOR, width=1, dash=(5, 4))
-
-        # 路線 polyline
-        wps = self._waypoints
-        if len(wps) >= 2:
-            coords = []
-            for wp in wps:
-                coords.extend(self._to_px(*wp))
-            # 閉合
-            coords.extend(self._to_px(*wps[0]))
-            c.create_line(*coords, fill=_ROUTE_COLOR, width=1.5, smooth=False)
-
-            # 方向箭頭（每隔若干點畫一個）
-            step = max(1, len(wps) // 8)
-            for i in range(0, len(wps), step):
-                p1 = wps[i]
-                p2 = wps[(i + 1) % len(wps)]
-                x1, y1 = self._to_px(*p1)
-                x2, y2 = self._to_px(*p2)
-                mx, my = (x1 + x2) / 2, (y1 + y2) / 2
-                angle = math.atan2(y2 - y1, x2 - x1)
-                self._draw_arrow(c, mx, my, angle, size=5)
-
-        # waypoint 小點
-        for wp in wps:
-            x, y = self._to_px(*wp)
-            c.create_oval(x - 2, y - 2, x + 2, y + 2,
-                          fill=_WP_DOT_COLOR, outline="")
-
-        # 花點（較大、帶數字標籤）
-        for i, f in enumerate(self._flowers):
-            x, y = self._to_px(*f)
-            c.create_oval(x - 5, y - 5, x + 5, y + 5,
-                          fill=_FLOWER_COLOR, outline="white", width=1)
-            c.create_text(x, y - 13, text=str(i + 1),
-                          fill=_FLOWER_COLOR, font=("", 9, "bold"))
-
-        # 比例尺
-        self._draw_scale(c, cw, ch)
+        draw_on_canvas(self._canvas, self._waypoints, self._flowers)
 
     def _draw_arrow(self, canvas, x, y, angle, size=5):
         tip_x = x + math.cos(angle) * size

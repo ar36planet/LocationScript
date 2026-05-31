@@ -7,11 +7,7 @@ from PyInstaller.utils.hooks import collect_all, copy_metadata
 pmd3_datas, pmd3_binaries, pmd3_hiddenimports = collect_all('pymobiledevice3')
 ctk_datas, ctk_binaries, ctk_hiddenimports = collect_all('customtkinter')
 
-extra_metadata = (
-    copy_metadata('readchar')
-    + copy_metadata('inquirer3')
-    + copy_metadata('pymobiledevice3')
-)
+extra_metadata = copy_metadata('pymobiledevice3')
 
 a = Analysis(
     ['app.py'],
