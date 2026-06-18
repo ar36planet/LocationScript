@@ -33,6 +33,53 @@ def _field(d: dict, *keys: str, default: str = "") -> str:
     return default
 
 
+def _summarize_device_scan_error(raw_error: str) -> str:
+    text = " ".join((raw_error or "").split()).strip()
+    if not text:
+        return "裝置偵測失敗"
+
+    lowered = text.lower()
+    if any(
+        marker in lowered
+        for marker in (
+            "importlib.metadata",
+            "stopiteration",
+            "packagenotfounderror",
+            "no package metadata was found",
+        )
+    ):
+        return "pymobiledevice3 安裝或打包異常，請重新安裝後再試"
+
+    if ("no module named" in lowered or "modulenotfounderror" in lowered) and "pymobiledevice3" in lowered:
+        return "pymobiledevice3 模組缺失，請重新安裝後再試"
+
+    if ("no such file or directory" in lowered or "errno 2" in lowered) and "pymobiledevice3" in lowered:
+        return "找不到 pymobiledevice3，請確認已正確安裝後再試"
+
+    if "no device connected" in lowered:
+        return "目前沒有偵測到已信任的 iPhone"
+
+    if "usbmux" in lowered and any(term in lowered for term in ("connection refused", "connectionreseterror")):
+        return "無法連線到 usbmuxd，請重新插拔 iPhone 後再試"
+
+    lines = [line.strip() for line in (raw_error or "").splitlines() if line.strip()]
+    if len(lines) > 1 and lines[0].startswith("Traceback"):
+        for line in reversed(lines):
+            if line.startswith("File ") or line.startswith("During handling") or line.startswith("Traceback"):
+                continue
+            if len(line) > 160:
+                line = line[:160] + "…"
+            return f"裝置偵測失敗：{line}"
+
+    if len(text) > 200:
+        text = text[:200] + "…"
+    return text
+
+
+def format_device_scan_error(raw_error: str) -> str:
+    return _summarize_device_scan_error(raw_error)
+
+
 def _fetch_raw_devices() -> list[dict]:
     global _LAST_DEVICE_SCAN_ERROR
     try:
@@ -41,12 +88,12 @@ def _fetch_raw_devices() -> list[dict]:
             capture_output=True, text=True, timeout=8,
         )
         if proc.returncode != 0:
-            _LAST_DEVICE_SCAN_ERROR = (proc.stderr or proc.stdout or "").strip()[:240]
+            _LAST_DEVICE_SCAN_ERROR = format_device_scan_error(proc.stderr or proc.stdout or "")
             return []
         _LAST_DEVICE_SCAN_ERROR = ""
         return json.loads(proc.stdout or "[]")
     except Exception as e:
-        _LAST_DEVICE_SCAN_ERROR = str(e)
+        _LAST_DEVICE_SCAN_ERROR = format_device_scan_error(str(e))
         return []
 
 

@@ -9,7 +9,7 @@ import sys
 import config
 import version
 from core.location_service import (
-    clear_location, location_status, parse_coords, parse_google_url, set_location,
+    clear_location, format_device_scan_error, location_status, parse_coords, parse_google_url, set_location,
     move_location_run, move_location_start, move_location_stop, move_location_status,
 )
 from core.result import Result
@@ -80,11 +80,11 @@ def _handle_device_list(_args) -> Result:
     try:
         proc = subprocess.run([cmd, "usbmux", "list"], capture_output=True, text=True, timeout=12)
     except Exception as e:
-        return Result(False, "EXEC_ERROR", f"Failed to list devices: {e}")
+        return Result(False, "EXEC_ERROR", format_device_scan_error(str(e)))
 
     if proc.returncode != 0:
         stderr = (proc.stderr or "").strip()
-        return Result(False, "EXEC_ERROR", f"Failed to list devices: {stderr[:160]}")
+        return Result(False, "EXEC_ERROR", format_device_scan_error(stderr or proc.stdout or ""))
 
     output = (proc.stdout or "").strip()
     default_udid = _load_default_udid()

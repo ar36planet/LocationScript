@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import messagebox, filedialog
+from tkinter import messagebox, filedialog, simpledialog
 import re
 import json
 
@@ -108,6 +108,9 @@ class ListEditorWindow:
                       height=BUTTON_HEIGHT, font=FONT_BODY,
                       fg_color=BTN_SECONDARY, hover_color=BTN_SECONDARY_HOVER, text_color=BTN_TEXT).pack(side="right", padx=(0, PAD_SM))
         ctk.CTkButton(list_top, text="🍎 種果路線", command=self._fruit_route,
+                      height=BUTTON_HEIGHT, font=FONT_BODY,
+                      fg_color=BTN_SECONDARY, hover_color=BTN_SECONDARY_HOVER, text_color=BTN_TEXT).pack(side="right", padx=(0, PAD_SM))
+        ctk.CTkButton(list_top, text="🔒 安全種果", command=self._safe_fruit_route,
                       height=BUTTON_HEIGHT, font=FONT_BODY,
                       fg_color=BTN_SECONDARY, hover_color=BTN_SECONDARY_HOVER, text_color=BTN_TEXT).pack(side="right", padx=(0, PAD_SM))
         ctk.CTkButton(list_top, text="👁 預覽路線", command=self._preview_route,
@@ -256,7 +259,8 @@ class ListEditorWindow:
         except ValueError:
             default_dwell = 0
 
-        flowers = [(float(it["lat"]), float(it["lng"])) for it in self._items]
+        original_items = self._items[:]
+        flowers = [(float(it["lat"]), float(it["lng"])) for it in original_items]
         self._source_flowers = flowers  # 記下原始花點供預覽使用
         result = route_planner.flower_circles_route(flowers)
         waypoints = result["waypoints"]
@@ -269,8 +273,21 @@ class ListEditorWindow:
             return
 
         in_zones = result.get("in_zones", [False] * len(waypoints))
+        ordered_flowers = result.get("ordered_flowers", [])
+        flower_lookup = {(float(it["lat"]), float(it["lng"])): it["name"]
+                         for it in original_items}
+        steps_per_flower = (len(waypoints) // len(ordered_flowers)
+                            if ordered_flowers else len(waypoints))
+
+        def _wp_name(k):
+            if not ordered_flowers:
+                return f"WP{k+1:02d}"
+            fi = k // steps_per_flower
+            step = k % steps_per_flower + 1
+            return f"P{fi+1:03d}-{step:02d}"
+
         self._items = [
-            {"name": f"WP{k+1:02d}", "lat": f"{wp[0]:.8f}",
+            {"name": _wp_name(k), "lat": f"{wp[0]:.8f}",
              "lng": f"{wp[1]:.8f}", "dwell": default_dwell,
              "in_zone": in_zones[k]}
             for k, wp in enumerate(waypoints)
@@ -321,6 +338,66 @@ class ListEditorWindow:
             f"預估時間：{dist/speed_mps/60:.1f} 分鐘（{speed_kmh:.0f} km/h）\n\n"
             f"建議主視窗使用「單次」巡邏模式",
         )
+
+    def _safe_fruit_route(self):
+        if not self._items:
+            messagebox.showwarning("座標不足", "請先解析至少 1 個座標")
+            return
+
+        max_dist = simpledialog.askfloat(
+            "安全種果路線",
+            "花點最大距離上限（公尺）\n路線全程不能離任何花點超過此距離",
+            initialvalue=80.0,
+            minvalue=50.0,
+            maxvalue=500.0,
+            parent=self.win,
+        )
+        if max_dist is None:
+            return
+
+        try:
+            default_dwell = max(0, int(self.dwell_entry.get().strip()))
+        except ValueError:
+            default_dwell = 0
+
+        flowers = [(float(it["lat"]), float(it["lng"])) for it in self._items]
+        self._source_flowers = flowers
+        result = route_planner.safe_fruit_route(flowers, max_dist_m=max_dist)
+        waypoints = result["waypoints"]
+
+        if not waypoints:
+            msg = "無法產生安全種果路線"
+            if result["warnings"]:
+                msg += "\n\n" + "\n".join(result["warnings"])
+            messagebox.showerror("規劃失敗", msg)
+            return
+
+        self._items = [
+            {"name": f"SF{k+1:03d}", "lat": f"{wp[0]:.8f}",
+             "lng": f"{wp[1]:.8f}", "dwell": default_dwell}
+            for k, wp in enumerate(waypoints)
+        ]
+        self._refresh_result_list()
+
+        n = len(waypoints)
+        dist = result["total_dist"]
+        try:
+            speed_kmh = max(1.0, float(self.plan_speed_entry.get().strip()))
+        except ValueError:
+            speed_kmh = 20.0
+        speed_mps = speed_kmh / 3.6
+
+        spots_found = sum(1 for s in result["fruit_spots"] if s is not None)
+        info_msg = (
+            f"已產生 {n} 個路徑點\n"
+            f"安全種果點：{spots_found} / {len(flowers)} 個花點\n"
+            f"避開半徑：{result['avoid_radius_m']:.0f}m  最大距離：{result['max_dist_m']:.0f}m\n"
+            f"總距離：{dist:.0f} 公尺\n"
+            f"預估時間：{dist/speed_mps/60:.1f} 分鐘（{speed_kmh:.0f} km/h）"
+        )
+        if result["warnings"]:
+            info_msg += "\n\n" + "\n".join(result["warnings"])
+        messagebox.showinfo("安全種果路線", info_msg)
 
     def _orbit_route(self):
         if not self._items:

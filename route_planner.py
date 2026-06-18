@@ -13,6 +13,7 @@
 
 import math
 import itertools
+import heapq
 from typing import List, Tuple, Optional
 
 # ── 型別別名 ──────────────────────────────────────────────
@@ -378,7 +379,7 @@ def two_opt(route: List[Point], origin: Point,
 
 def flower_circles_route(
     flowers: List[Point],
-    circle_radius_m: float = 30.0,
+    circle_radius_m: float = 25.0,
     circle_steps: int = 8,
 ) -> dict:
     """
@@ -596,6 +597,386 @@ def parse_input() -> List[Point]:
             print("  ❌ 格式錯誤，請輸入如：25.021056,121.739472")
 
     return flowers
+
+
+# ════════════════════════════════════════════════════════════
+# 種果安全路線
+# ════════════════════════════════════════════════════════════
+
+def _is_safe_m(
+    p: Tuple[float, float],
+    flowers_m: List[Tuple[float, float]],
+    avoid_r: float,
+    max_r: float,
+) -> bool:
+    """True if p is outside every forbidden zone AND within max_r of at least one flower."""
+    near = False
+    for f in flowers_m:
+        d = math.hypot(p[0] - f[0], p[1] - f[1])
+        if d < avoid_r:
+            return False
+        if d <= max_r:
+            near = True
+    return near
+
+
+def _seg_safe_m(
+    a: Tuple[float, float],
+    b: Tuple[float, float],
+    flowers_m: List[Tuple[float, float]],
+    avoid_r: float,
+    max_r: float,
+    step: float = 5.0,
+) -> bool:
+    """True if the segment a→b stays entirely in the safe zone (sampled every step metres)."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    length = math.hypot(dx, dy)
+    if length < 1e-6:
+        return _is_safe_m(a, flowers_m, avoid_r, max_r)
+    n_steps = max(2, int(length / step) + 1)
+    for i in range(n_steps + 1):
+        t = i / n_steps
+        if not _is_safe_m((a[0] + t * dx, a[1] + t * dy), flowers_m, avoid_r, max_r):
+            return False
+    return True
+
+
+def _dijkstra_path(
+    adj: List[List[Tuple[int, float]]],
+    src: int,
+    dst: int,
+) -> Tuple[float, List[int]]:
+    """Dijkstra on adjacency list. Returns (distance, node-index path). path=[] if unreachable."""
+    n = len(adj)
+    dist = [math.inf] * n
+    prev = [-1] * n
+    dist[src] = 0.0
+    pq: List[Tuple[float, int]] = [(0.0, src)]
+    while pq:
+        d, u = heapq.heappop(pq)
+        if d > dist[u]:
+            continue
+        if u == dst:
+            break
+        for v, w in adj[u]:
+            nd = d + w
+            if nd < dist[v]:
+                dist[v] = nd
+                prev[v] = u
+                heapq.heappush(pq, (nd, v))
+    if math.isinf(dist[dst]):
+        return math.inf, []
+    path, u = [], dst
+    while u != -1:
+        path.append(u)
+        u = prev[u]
+    return dist[dst], path[::-1]
+
+
+def safe_fruit_route(
+    flowers: List[Point],
+    start: Optional[Point] = None,
+    end: Optional[Point] = None,
+    avoid_radius_m: float = FLOWER_RADIUS_M,
+    max_dist_m: float = 80.0,
+    margin_m: float = 5.0,
+    n_candidates: int = 24,
+) -> dict:
+    """
+    種果安全路線：全程在所有花點有效範圍外（> avoid_radius_m），
+    且不離最近花點超過 max_dist_m。
+
+    end=None  → 循環路線，自動遍訪每個花點旁最佳種果點後回起點
+    start/end → 單向最短安全路徑
+
+    回傳 dict：
+      waypoints    - 完整路線（經緯度列表）
+      total_dist   - 總距離（公尺）
+      is_loop      - bool
+      fruit_spots  - 每個花點對應最佳種果座標（None 表示找不到）
+      warnings     - 警告列表
+      avoid_radius_m, max_dist_m - 使用的參數
+    """
+    is_loop = end is None
+    warnings: List[str] = []
+
+    if not flowers:
+        return {"waypoints": [], "total_dist": 0.0, "is_loop": is_loop,
+                "fruit_spots": [], "warnings": ["未輸入花點"],
+                "avoid_radius_m": avoid_radius_m, "max_dist_m": max_dist_m}
+
+    origin = flowers[0]
+    flowers_m = [to_meters(f, origin) for f in flowers]
+    safe_r = avoid_radius_m + margin_m
+
+    for i in range(len(flowers_m)):
+        for j in range(i + 1, len(flowers_m)):
+            d = math.hypot(flowers_m[i][0] - flowers_m[j][0],
+                           flowers_m[i][1] - flowers_m[j][1])
+            if d < 2 * avoid_radius_m:
+                warnings.append(
+                    f"⚠️ 花點 {i+1} 與 {j+1} 距離 {d:.0f}m，禁區重疊"
+                    f"（< {2*avoid_radius_m:.0f}m）"
+                )
+
+    # ── 1. 生成候選節點 ────────────────────────────────────
+    per_flower_cands: List[List[Tuple[float, float]]] = []
+    all_cands: List[Tuple[float, float]] = []
+
+    for fi, f_m in enumerate(flowers_m):
+        cands: List[Tuple[float, float]] = []
+        for k in range(n_candidates):
+            angle = 2 * math.pi * k / n_candidates
+            p = (f_m[0] + safe_r * math.cos(angle),
+                 f_m[1] + safe_r * math.sin(angle))
+            if _is_safe_m(p, flowers_m, avoid_radius_m, max_dist_m):
+                cands.append(p)
+        per_flower_cands.append(cands)
+        all_cands.extend(cands)
+
+    # 補充花點對之間的通道中點候選（避免窄通道無節點）
+    for i in range(len(flowers_m)):
+        for j in range(i + 1, len(flowers_m)):
+            d = math.hypot(flowers_m[i][0] - flowers_m[j][0],
+                           flowers_m[i][1] - flowers_m[j][1])
+            if d >= 2 * max_dist_m:
+                continue
+            dx_n = (flowers_m[j][0] - flowers_m[i][0]) / d
+            dy_n = (flowers_m[j][1] - flowers_m[i][1]) / d
+            mid = ((flowers_m[i][0] + flowers_m[j][0]) / 2,
+                   (flowers_m[i][1] + flowers_m[j][1]) / 2)
+            for off in (0.0, safe_r * 0.5, -safe_r * 0.5, safe_r, -safe_r):
+                p = (mid[0] - dy_n * off, mid[1] + dx_n * off)
+                if _is_safe_m(p, flowers_m, avoid_radius_m, max_dist_m):
+                    all_cands.append(p)
+
+    # 去重（1m 內視為同點）
+    unique_cands: List[Tuple[float, float]] = []
+    for p in all_cands:
+        if not any(math.hypot(p[0] - q[0], p[1] - q[1]) < 1.0 for q in unique_cands):
+            unique_cands.append(p)
+    all_cands = unique_cands
+
+    if not all_cands:
+        return {"waypoints": [], "total_dist": 0.0, "is_loop": is_loop,
+                "fruit_spots": [], "warnings": warnings + ["所有候選點均落入禁區，無法規劃路線"],
+                "avoid_radius_m": avoid_radius_m, "max_dist_m": max_dist_m}
+
+    # ── 2. 選各花點代表種果點 ─────────────────────────────
+    # 選最靠近其他花點重心的候選（傾向內側，縮短迴路）
+    fruit_spots_m: List[Optional[Tuple[float, float]]] = []
+    for fi, f_m in enumerate(flowers_m):
+        if not per_flower_cands[fi]:
+            fruit_spots_m.append(None)
+            warnings.append(f"⚠️ 花點 {fi+1} 附近無安全種果點")
+            continue
+        others = [flowers_m[j] for j in range(len(flowers_m)) if j != fi]
+        if others:
+            cx = sum(o[0] for o in others) / len(others)
+            cy = sum(o[1] for o in others) / len(others)
+            spot = min(per_flower_cands[fi],
+                       key=lambda p: math.hypot(p[0] - cx, p[1] - cy))
+        else:
+            spot = per_flower_cands[fi][0]
+        fruit_spots_m.append(spot)
+
+    # ── 3. 建立可見度圖 ────────────────────────────────────
+    nodes: List[Tuple[float, float]] = list(all_cands)
+
+    def _add_node(p_m: Optional[Tuple[float, float]]) -> Optional[int]:
+        if p_m is None:
+            return None
+        for i, n in enumerate(nodes):
+            if math.hypot(n[0] - p_m[0], n[1] - p_m[1]) < 0.1:
+                return i
+        idx = len(nodes)
+        nodes.append(p_m)
+        return idx
+
+    start_m = to_meters(start, origin) if start is not None else None
+    end_m   = to_meters(end,   origin) if end   is not None else None
+    start_idx = _add_node(start_m)
+    end_idx   = _add_node(end_m) if not is_loop else None
+    spot_idx  = [_add_node(s) for s in fruit_spots_m]
+
+    n_nodes = len(nodes)
+    adj: List[List[Tuple[int, float]]] = [[] for _ in range(n_nodes)]
+    for i in range(n_nodes):
+        for j in range(i + 1, n_nodes):
+            if _seg_safe_m(nodes[i], nodes[j], flowers_m, avoid_radius_m, max_dist_m):
+                d = math.hypot(nodes[i][0] - nodes[j][0], nodes[i][1] - nodes[j][1])
+                adj[i].append((j, d))
+                adj[j].append((i, d))
+
+    # ── 4a. 循環路線 ──────────────────────────────────────
+    if is_loop:
+        tsp_nodes = [idx for idx in spot_idx if idx is not None]
+        if not tsp_nodes:
+            return {"waypoints": [], "total_dist": 0.0, "is_loop": True,
+                    "fruit_spots": [from_meters(s, origin) if s else None for s in fruit_spots_m],
+                    "warnings": warnings + ["無可用種果點"],
+                    "avoid_radius_m": avoid_radius_m, "max_dist_m": max_dist_m}
+
+        n_t = len(tsp_nodes)
+
+        # All-pairs Dijkstra
+        ap_d: List[List[float]] = [[math.inf] * n_t for _ in range(n_t)]
+        ap_p: List[List[List[int]]] = [[[] for _ in range(n_t)] for _ in range(n_t)]
+        for i in range(n_t):
+            ap_d[i][i] = 0.0
+            ap_p[i][i] = [tsp_nodes[i]]
+        for i in range(n_t):
+            for j in range(i + 1, n_t):
+                dij, pij = _dijkstra_path(adj, tsp_nodes[i], tsp_nodes[j])
+                ap_d[i][j] = ap_d[j][i] = dij
+                ap_p[i][j] = pij
+                ap_p[j][i] = pij[::-1]
+
+        # 貪婪 TSP（每個起點都試一次）
+        best_tour: Optional[List[int]] = None
+        best_dist_tsp = math.inf
+        for s in range(n_t):
+            vis = [False] * n_t
+            tour = [s]
+            vis[s] = True
+            total = 0.0
+            cur = s
+            while len(tour) < n_t:
+                nxt = min(
+                    (j for j in range(n_t) if not vis[j]),
+                    key=lambda j: ap_d[cur][j],
+                    default=None,
+                )
+                if nxt is None or math.isinf(ap_d[cur][nxt]):
+                    break
+                tour.append(nxt)
+                vis[nxt] = True
+                total += ap_d[cur][nxt]
+                cur = nxt
+            total += ap_d[cur][s]
+            if len(tour) == n_t and total < best_dist_tsp:
+                best_dist_tsp = total
+                best_tour = tour[:]
+
+        if best_tour is None:
+            return {"waypoints": [], "total_dist": 0.0, "is_loop": True,
+                    "fruit_spots": [from_meters(s, origin) if s else None for s in fruit_spots_m],
+                    "warnings": warnings + ["無法建立連通迴路（部分花點可能被禁區包圍）"],
+                    "avoid_radius_m": avoid_radius_m, "max_dist_m": max_dist_m}
+
+        # 2-opt 改良
+        improved = True
+        while improved:
+            improved = False
+            for i in range(n_t - 1):
+                for j in range(i + 2, n_t):
+                    if i == 0 and j == n_t - 1:
+                        continue
+                    old_c = (ap_d[best_tour[i]][best_tour[i + 1]] +
+                             ap_d[best_tour[j]][best_tour[(j + 1) % n_t]])
+                    new_c = (ap_d[best_tour[i]][best_tour[j]] +
+                             ap_d[best_tour[i + 1]][best_tour[(j + 1) % n_t]])
+                    if new_c < old_c - 1e-6:
+                        best_tour[i + 1:j + 1] = best_tour[i + 1:j + 1][::-1]
+                        best_dist_tsp = sum(
+                            ap_d[best_tour[k]][best_tour[(k + 1) % n_t]]
+                            for k in range(n_t)
+                        )
+                        improved = True
+                        break
+                if improved:
+                    break
+
+        # 重建完整路徑
+        path_nodes: List[int] = []
+        for k in range(n_t):
+            seg = ap_p[best_tour[k]][best_tour[(k + 1) % n_t]]
+            if not seg:
+                warnings.append(
+                    f"⚠️ 種果點 {best_tour[k]+1}→{best_tour[(k+1)%n_t]+1} 無法連接"
+                )
+                continue
+            if path_nodes and path_nodes[-1] == seg[0]:
+                path_nodes.extend(seg[1:])
+            else:
+                path_nodes.extend(seg)
+
+        waypoints = [from_meters(nodes[i], origin) for i in path_nodes]
+
+    # ── 4b. 單向路線 ──────────────────────────────────────
+    else:
+        if start_idx is None or end_idx is None:
+            return {"waypoints": [], "total_dist": 0.0, "is_loop": False,
+                    "fruit_spots": [], "warnings": warnings + ["缺少起點或終點"],
+                    "avoid_radius_m": avoid_radius_m, "max_dist_m": max_dist_m}
+        _, path = _dijkstra_path(adj, start_idx, end_idx)
+        if not path:
+            return {"waypoints": [], "total_dist": 0.0, "is_loop": False,
+                    "fruit_spots": [from_meters(s, origin) if s else None for s in fruit_spots_m],
+                    "warnings": warnings + ["找不到安全路徑（嘗試增大 max_dist_m）"],
+                    "avoid_radius_m": avoid_radius_m, "max_dist_m": max_dist_m}
+        waypoints = [from_meters(nodes[i], origin) for i in path]
+
+    total_dist = sum(haversine(waypoints[i], waypoints[i + 1])
+                     for i in range(len(waypoints) - 1))
+    fruit_spots = [from_meters(s, origin) if s is not None else None for s in fruit_spots_m]
+
+    return {
+        "waypoints":      waypoints,
+        "total_dist":     total_dist,
+        "is_loop":        is_loop,
+        "fruit_spots":    fruit_spots,
+        "warnings":       warnings,
+        "avoid_radius_m": avoid_radius_m,
+        "max_dist_m":     max_dist_m,
+    }
+
+
+def print_safe_fruit_result(flowers: List[Point], result: dict):
+    waypoints   = result["waypoints"]
+    fruit_spots = result["fruit_spots"]
+    dist        = result["total_dist"]
+    warnings    = result["warnings"]
+    is_loop     = result["is_loop"]
+
+    print("=" * 55)
+    print("  🔒 種果安全路線規劃結果")
+    print("=" * 55)
+    print(f"  避開半徑：{result['avoid_radius_m']:.0f}m  "
+          f"最大距離：{result['max_dist_m']:.0f}m  "
+          f"{'循環' if is_loop else '單向'}")
+
+    print(f"\n📍 花點與最佳種果點（共 {len(flowers)} 個）：")
+    for i, (f, spot) in enumerate(zip(flowers, fruit_spots)):
+        if spot:
+            d = haversine(f, spot)
+            print(f"   花點 {i+1:>2}  {f[0]:.8f}, {f[1]:.9f}")
+            print(f"   種果點    {spot[0]:.8f}, {spot[1]:.9f}  （距花點 {d:.1f}m）")
+        else:
+            print(f"   花點 {i+1:>2}  {f[0]:.8f}, {f[1]:.9f}  ⚠️ 無安全種果點")
+
+    if waypoints:
+        print(f"\n🗺️  安全路線（共 {len(waypoints)} 個 waypoint）：")
+        for i, pt in enumerate(waypoints):
+            label = ""
+            if i == 0:
+                label = "（起點）"
+            elif is_loop and i == len(waypoints) - 1:
+                label = "（回起點）"
+            print(f"   WP{i+1:03d}  {pt[0]:.8f}, {pt[1]:.9f}  {label}")
+    else:
+        print("\n❌ 未能生成路線")
+
+    print(f"\n📊 統計：")
+    print(f"   總距離：{dist:.1f} 公尺")
+    print(f"   預估時間：{dist / WALK_SPEED_MPS / 60:.1f} 分鐘"
+          f"（步行 {WALK_SPEED_MPS * 3.6:.1f} km/h）")
+
+    if warnings:
+        print("\n⚠️  警告：")
+        for w in warnings:
+            print(f"   {w}")
+    print("\n" + "=" * 55)
 
 
 if __name__ == "__main__":

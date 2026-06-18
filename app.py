@@ -575,9 +575,8 @@ def _update_device_label(reset_timer: bool = False):
                 if not devices:
                     _device_selector_frame.pack_forget()
                     if scan_error:
-                        hint = "（請確認 iPhone 已信任、或終端可執行 `pymobiledevice3 usbmux list`）"
                         device_label.configure(
-                            text=f"⚠️ 裝置偵測失敗：{scan_error} {hint}",
+                            text=f"⚠️ 裝置偵測失敗：{scan_error}",
                             text_color="orange",
                         )
                     else:
